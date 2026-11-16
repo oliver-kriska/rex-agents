@@ -14,6 +14,10 @@
 --                                     copy a tab into a new session NAME, resume commands typed but not run;
 --                                     close the old tab, then: rex-agents start-pending NAME
 --   rex-agents start-pending NAME
+--   rex-agents status [--json]        each agent pane's hub name and whether its program already has it
+--   rex-agents verify [--against FILE]
+--                                     check panes.json and the watcher; with FILE (a copy of panes.json
+--                                     taken before a change), list missing entries and changed commands
 
 local here = debug.getinfo(1, "S").source:match("^@?(.*)/[^/]+$") or "."
 package.path = here .. "/../?.lua;" .. here .. "/?.lua;" .. package.path
@@ -30,6 +34,8 @@ rex-agents: remember what runs in each Rex pane and bring it back.
   rex-agents template-list
   rex-agents tab-to-session SESSION_ID WINDOW_ID NAME
   rex-agents start-pending NAME
+  rex-agents status [--json]
+  rex-agents verify [--against FILE]
 
 Rex restores sessions, tabs, splits, pane labels and cwd itself, under the same block IDs,
 but no programs. Only known programs are recorded: Claude Code (resumed by session ID, with
@@ -210,6 +216,66 @@ local function cmd_start_pending(a)
   end
 end
 
+local function ago(t)
+  if not t then return "never" end
+  local d = os.time() - t
+  if d < 120 then return d .. " s ago" end
+  if d < 7200 then return math.floor(d / 60) .. " min ago" end
+  return math.floor(d / 3600) .. " h ago"
+end
+
+local function watcher_line(w)
+  if not w then return nil end
+  if not w.loaded then return "watcher: not loaded" end
+  if not w.pid then return "watcher: loaded, not running" end
+  return "watcher: running (pid " .. w.pid .. ")"
+end
+
+local function cmd_status(a)
+  local st = A.status()
+  if flag(a, "--json") then
+    local rows = {}
+    for _, r in ipairs(st.rows) do
+      rows[#rows + 1] = { session = r.session, session_id = r.session_id, window = r.window, label = r.label,
+        block_id = r.block_id, kind = r.kind, hub_name = r.hub_name, env_hub = r.env_hub, state = r.state,
+        pending = r.state == "restart pending" }
+    end
+    print(A.encode({ panes = rows, saved_at = st.saved_at, watcher = st.watcher }))
+    return
+  end
+  local function cut(s, n) s = tostring(s or ""); return #s > n and (s:sub(1, n - 1) .. "…") or s end
+  local fmt = "%-18s %-14s %-12s %-10s %-28s %s"
+  print(string.format(fmt, "SESSION", "TAB", "PANE", "KIND", "HUB NAME", "STATE"))
+  local pending, idle = 0, 0
+  for _, r in ipairs(st.rows) do
+    print(string.format(fmt, cut(r.session, 18), cut(r.window, 14), cut(r.label, 12), r.kind, r.hub_name or "-", r.state))
+    if r.state == "restart pending" then pending = pending + 1 end
+    if r.state == "not running" then idle = idle + 1 end
+  end
+  print("")
+  local foot = { "last save " .. ago(st.saved_at) }
+  local w = watcher_line(st.watcher)
+  if w then table.insert(foot, 1, w) end
+  print(table.concat(foot, " · "))
+  if pending > 0 then
+    print(pending .. " running agent(s) have no HUB_NAME yet; they get it the next time rex-agents starts them"
+      .. " (⌘⇧B after a Rex restart, or park → reopen).")
+  end
+  if idle > 0 then print(idle .. " agent pane(s) are idle shells; ⌘⇧B brings them back.") end
+end
+
+local function cmd_verify(a)
+  local against
+  for i, x in ipairs(a) do if x == "--against" then against = a[i + 1] end end
+  if against == nil and flag(a, "--against") then error("usage: rex-agents verify [--against FILE]", 0) end
+  local r = A.verify(against)
+  for _, l in ipairs(r.info) do print(l) end
+  for _, l in ipairs(r.warnings) do print("warning: " .. l) end
+  for _, l in ipairs(r.errors) do print("PROBLEM: " .. l) end
+  if #r.errors > 0 then error(#r.errors .. " problem(s)", 0) end
+  print("ok")
+end
+
 local a = args()
 local c = a[1]
 if not c or c == "-h" or c == "--help" or c == "help" then
@@ -225,6 +291,8 @@ local cmds = {
   ["template-list"] = function() for _, n in ipairs(A.template_names()) do print(n) end end,
   ["tab-to-session"] = cmd_tab_to_session,
   ["start-pending"] = cmd_start_pending,
+  status = cmd_status,
+  verify = cmd_verify,
 }
 local f = cmds[c]
 if not f then error("unknown command: " .. c, 0) end

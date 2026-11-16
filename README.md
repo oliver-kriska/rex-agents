@@ -25,8 +25,12 @@ git clone … ~/src/rex-agents && cd ~/src/rex-agents
 ```
 
 `install.sh` links `~/.config/rex/rex-agents` and `~/.config/rex/bin/rex-agents` to the
-checkout, copies `examples/rex-agents.local.lua` to `~/.config/rex/` if you have none, and loads
-a LaunchAgent that runs the watcher. Then add one line to `~/.config/rex/init.lua`:
+checkout, copies `examples/rex-agents.local.lua` to `~/.config/rex/` if you have none (it never
+overwrites yours), and loads a LaunchAgent that runs the watcher. It copies `panes.json` to
+`panes.before-install-<time>.json` first, waits for the watcher's first save and runs
+`rex-agents verify --against` that copy. If saved panes exist but you had no settings, it stops
+before starting the watcher, so a save with the example settings can't drop the panes only your
+settings recognise (`--force` starts it anyway). Then add one line to `~/.config/rex/init.lua`:
 
 ```lua
 require("rex-agents.actions"){}
@@ -54,7 +58,26 @@ rex-agents template-open [NAME|--pick] [--fresh]
 rex-agents park SESSION_ID [NAME]
 rex-agents template-list
 rex-agents tab-to-session SESSION_ID WINDOW_ID NAME   # then: rex-agents start-pending NAME
+rex-agents status [--json]
+rex-agents verify [--against FILE]
 ```
+
+`status` lists every agent pane with its hub name (see below) and whether the running program
+already has it:
+
+| State | Meaning |
+| --- | --- |
+| `ok` | runs with `HUB_NAME` set to its name |
+| `restart pending` | runs without `HUB_NAME` (started by hand, or before names existed); gets it the next time rex-agents starts it |
+| `runs as NAME` | runs with another `HUB_NAME`, set by hand |
+| `not saved yet` | started since the last save (the watcher saves within 20 s) |
+| `not running` | an idle shell after a restart; ⌘⇧B brings it back |
+
+`--json` gives the same rows with session and block IDs. `verify` checks `panes.json` (entries
+have a command, no duplicate names among live panes, no leftover helper fields), the watcher
+and the time of the last save, and exits 1 on a problem. With `--against`, a copy of
+`panes.json` taken before a change, it also lists entries that went missing and commands that
+changed; a pane you closed or a program you exited is only a warning.
 
 Revive only types into a pane whose foreground program is a shell, so it never starts anything
 twice.
@@ -103,7 +126,8 @@ restarts, revives and park/reopen, in `hub_name` in `panes.json` and in template
 3. the pane label, unless it's a generic one such as `shell`;
 4. `<session>-<kind>-<last 6 characters of the block ID>`.
 
-Names are unique among live panes: a taken one gets the session name in front. Names follow
+Names are unique among live panes: a taken one gets the session name in front.
+`rex-agents status` shows each pane's name and whether its program already has it. Names follow
 `[A-Za-z0-9][A-Za-z0-9._-]*`, at most 64 characters. A program that is already running keeps
 its environment; it gets the name the next time rex-agents starts it.
 
@@ -148,7 +172,8 @@ extra `viewers`, `labelled` panes (`label` + `cwd_suffix` → `cmd`), service pa
 and the init.lua `services.action` to run), and `keep_missing`.
 
 Environment overrides, mainly for tests: `REX_AGENTS_STATE`, `REX_AGENTS_TEMPLATES`,
-`REX_AGENTS_CLAUDE_SESSIONS`, `REX_AGENTS_CONFIG`, `REX_AGENTS_SERVER`.
+`REX_AGENTS_CLAUDE_SESSIONS`, `REX_AGENTS_CONFIG`, `REX_AGENTS_SERVER`, and
+`REX_AGENTS_WATCH_LABEL` (the LaunchAgent `status`/`verify` check; `-` skips the check).
 
 ## Safety notes
 

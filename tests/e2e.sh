@@ -58,7 +58,7 @@ EOF
 unset REX_SESSION REX_BLOCK REX_CLIENT
 export ZDOTDIR="$T/zdot" PATH="$T/bin:$PATH" REX_SERVER="$URL" REX_AGENTS_SERVER="$URL" \
   REX_AGENTS_STATE="$T/agents" REX_AGENTS_TEMPLATES="$T/templates" REX_AGENTS_CLAUDE_SESSIONS="$T/claude" \
-  REX_AGENTS_CONFIG="$T/local.lua" FAKE_AMP_DIR="$T/amp"
+  REX_AGENTS_CONFIG="$T/local.lua" FAKE_AMP_DIR="$T/amp" REX_AGENTS_WATCH_LABEL=-
 RA="$ROOT/bin/rex-agents"
 
 start_server() {
@@ -135,6 +135,17 @@ jq -e '[.panes[] | keys[] | select(startswith("_"))] | length == 0' "$P" >/dev/n
 names() { jq -S '[.panes | to_entries[] | {b: .key, h: .value.hub_name}] | sort_by(.b)' "$P"; }
 names >"$T/names1.json"
 ok "hub names: session name, label, block id, collisions, env"
+
+# ---- status: started by hand, so only the pane started with HUB_NAME has it
+st() { "$RA" status --json | jq -r --arg s "$1" --arg l "$2" '[.panes[] | select(.session == $s and .label == $l)][0].state'; }
+[ "$(st "Hub Names" envd)" = ok ] || fail "status: envd runs with its name"
+[ "$(st Proj mgr)" = "restart pending" ] || fail "status: mgr is restart pending"
+[ "$("$RA" status --json | jq '[.panes[]] | length')" = 10 ] || fail "status lists the 10 agent panes"
+"$RA" status --json | jq -e '[.panes[] | select(.session_id == null or .block_id == null)] | length == 0' >/dev/null || fail "status rows carry session and block ids"
+"$RA" status | grep -q "running agent(s) have no HUB_NAME yet" || fail "status footer"
+"$RA" verify >/dev/null || { "$RA" verify; fail "verify after the first save"; }
+cp "$P" "$T/before-restart.json"
+ok "status: ok / restart pending; verify passes"
 # ---- (a) restart the server: panes come back as empty shells under the same block IDs
 OLD_SERVER=$(jq -r .server "$P")
 stop_server
@@ -144,6 +155,8 @@ start_server
 [ "$(jq -r .server "$P")" != "$OLD_SERVER" ] || fail "server id must change on restart"
 [ "$("$RA" revive --dry-run | grep -vc "^services:")" = 11 ] || fail "11 panes must be revivable after the restart"
 names | diff - "$T/names1.json" >/dev/null || fail "hub names must survive the restart"
+[ "$(st Proj mgr)" = "not running" ] || fail "status after restart: not running"
+"$RA" verify --against "$T/before-restart.json" >/dev/null || { "$RA" verify --against "$T/before-restart.json"; fail "verify --against after restart"; }
 ok "(a) restart: 12 panes kept, new server id, same hub names"
 
 # ---- (b) revive everything
@@ -166,6 +179,25 @@ wait_for "Hub Names" shell "^hub=hub-names-claude-"
 [ "$(jq -r '[.panes[] | select(.kind != "services")] | map(.alive_on) | unique | length' "$P")" = 1 ] || fail "revived panes are alive on the new server"
 names | diff - "$T/names1.json" >/dev/null || fail "hub names must survive the revive"
 ok "(b) revive: 11 commands typed into the right panes with their HUB_NAME, services action run"
+
+# ---- status after the revive: every agent runs with its name
+"$RA" status --json | jq -e '[.panes[] | select(.state != "ok")] | length == 0' >/dev/null \
+  || { "$RA" status; fail "status after revive: all ok"; }
+# verify finds what the manual checks looked for
+mkdir -p "$T/bad"
+jq '(.panes | to_entries | map(select(.value.session == "Proj" and (.value.label == "amp" or .value.label == "runner"))) | map(.key)) as $k
+    | .panes[$k[0]].hub_name = "dup" | .panes[$k[1]].hub_name = "dup" | .panes[$k[0]]._env_hub = "x"' "$P" >"$T/bad/panes.json"
+jq '(.panes | to_entries | map(select(.value.label == "mgr" and .value.session == "Proj")) | .[0].key) as $b
+    | .panes[$b].revive = ["claude", "--model", "other"]
+    | .panes["block:gone"] = {kind: "claude", label: "gone", session: "Proj", revive: ["claude"]}' "$P" >"$T/bad/old.json"
+REX_AGENTS_STATE="$T/bad" "$RA" verify --against "$T/bad/old.json" >"$T/verify.txt" 2>&1 && fail "verify must fail on a bad panes.json"
+grep -q "hub name dup is used by 2 live panes" "$T/verify.txt" || { cat "$T/verify.txt"; fail "verify: duplicate hub name"; }
+grep -q "helper field _env_hub" "$T/verify.txt" || fail "verify: leaked helper field"
+grep -q "revive command changed: Proj" "$T/verify.txt" || fail "verify: changed revive command"
+grep -q "gone since .*pane closed" "$T/verify.txt" || fail "verify: closed pane is a warning"
+REX_AGENTS_WATCH_LABEL=e2e-no-such-watcher "$RA" verify >"$T/verify.txt" 2>&1 && fail "verify must fail without the watcher"
+grep -q "watcher e2e-no-such-watcher is not loaded" "$T/verify.txt" || fail "verify: watcher"
+ok "status after revive: all ok; verify catches duplicates, leaked fields, changed commands, missing watcher"
 
 # ---- (c) park and reopen
 PARK=$(rx ls --json | jq -r '.sessions[] | select(.label == "Park Me") | .session_id')

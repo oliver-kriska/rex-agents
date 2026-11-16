@@ -4,6 +4,7 @@
 #   ./install.sh            install / update
 #   ./install.sh --dry-run  print what would happen
 #   ./install.sh --uninstall
+#   ./install.sh --force    start the watcher even with the example settings over existing saved state
 #
 # It never edits init.lua; it prints the line to add. It never touches the Rex server.
 set -eu
@@ -16,8 +17,16 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$HOME/Library/Logs/rex-agents.log"
 REX=$(command -v rex 2>/dev/null || true)
 [ -n "$REX" ] || REX="$HOME/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex"
-DRY=0
-[ "${1:-}" = "--dry-run" ] && DRY=1
+STATE="${REX_AGENTS_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/rex-agents}"
+DRY=0 FORCE=0 UNINSTALL=0
+for a in "$@"; do
+  case $a in
+    --dry-run) DRY=1 ;;
+    --force) FORCE=1 ;;
+    --uninstall) UNINSTALL=1 ;;
+    *) echo "unknown option: $a"; exit 2 ;;
+  esac
+done
 
 run() {
   echo "+ $*"
@@ -26,7 +35,7 @@ run() {
 
 xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 
-if [ "${1:-}" = "--uninstall" ]; then
+if [ "$UNINSTALL" = 1 ]; then
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   rm -f "$PLIST"
   [ -L "$CONF/rex-agents" ] && rm "$CONF/rex-agents"
@@ -50,10 +59,32 @@ if [ -e "$CONF/bin/rex-agents" ] && [ ! -L "$CONF/bin/rex-agents" ]; then
 fi
 run ln -sfn "$ROOT/bin/rex-agents" "$CONF/bin/rex-agents"
 
-# 2. machine settings (only if there are none yet)
+# 2. machine settings (only if there are none yet; never overwritten)
 if [ ! -e "$CONF/rex-agents.local.lua" ]; then
   run cp "$ROOT/examples/rex-agents.local.lua" "$CONF/rex-agents.local.lua"
+  # Saved state from an earlier install but no settings: the watcher's first save would run with
+  # the example settings and drop the panes only your settings recognise. Stop here instead.
+  if [ "$FORCE" = 0 ] && [ -s "$STATE/panes.json" ] && grep -q '"kind"' "$STATE/panes.json"; then
+    cat <<EOF
+
+$STATE/panes.json has saved panes, but there were no settings, so the example was copied to
+$CONF/rex-agents.local.lua. The watcher was NOT started: its first save with the example
+settings could drop panes that your own settings recognise (labelled and service panes).
+Put your settings in that file and run ./install.sh again, or ./install.sh --force to start
+the watcher with the example settings.
+EOF
+    exit 1
+  fi
 fi
+
+# keep a copy of the saved state, to compare with after the watcher's first save
+BEFORE=
+if [ -s "$STATE/panes.json" ]; then
+  BEFORE="$STATE/panes.before-install-$(date +%Y%m%d%H%M%S).json"
+  run cp -p "$STATE/panes.json" "$BEFORE"
+fi
+
+INSTALL_START=$(date +%s)
 
 # 3. watcher: keeps panes.json current; launchd restarts it whenever the Rex server restarts
 if [ "$DRY" = 1 ]; then
@@ -96,6 +127,23 @@ if [ -e "$OLD_PLIST" ]; then
     launchctl bootout "gui/$(id -u)/$OLD_LABEL" 2>/dev/null || true
     mv "$OLD_PLIST" "$OLD_PLIST.disabled"
     echo "+ retired $OLD_LABEL (plist kept as $OLD_PLIST.disabled)"
+  fi
+fi
+
+# 5. check the watcher's first save against the copy taken above
+if [ "$DRY" = 1 ]; then
+  echo "+ wait for the watcher's first save, then: rex-agents verify${BEFORE:+ --against $BEFORE}"
+else
+  mtime() { stat -f %m "$1" 2>/dev/null || echo 0; }
+  i=0
+  until [ "$(mtime "$STATE/panes.json")" -ge "$INSTALL_START" ] || [ $i -ge 30 ]; do sleep 1; i=$((i + 1)); done
+  echo
+  if [ "$(mtime "$STATE/panes.json")" -lt "$INSTALL_START" ]; then
+    echo "The watcher hasn't saved within 30 s (is Rex running?). Check later with: rex-agents verify${BEFORE:+ --against $BEFORE}"
+  elif "$ROOT/bin/rex-agents" verify ${BEFORE:+--against "$BEFORE"}; then
+    echo "+ verify passed"
+  else
+    echo "verify found problems (above). The state before installing is in ${BEFORE:-(none)}."
   fi
 fi
 

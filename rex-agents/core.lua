@@ -811,6 +811,169 @@ function M.save()
   return { panes = count }
 end
 
+-- ---- status and verify -----------------------------------------------------------------------
+
+-- The LaunchAgent that runs watch.lua: { label, loaded, pid }, or nil when the check is off
+-- (REX_AGENTS_WATCH_LABEL=-, used by the tests).
+function M.watcher()
+  local label = env("REX_AGENTS_WATCH_LABEL", "com.rex-agents.watch")
+  if label == "-" then return nil end
+  local r = exec({ "launchctl", "list", label })
+  if not r or not r.ok then return { label = label, loaded = false } end
+  return { label = label, loaded = true, pid = tonumber(r.stdout:match('"PID"%s*=%s*(%d+)')) }
+end
+
+-- One row per live pane that runs an agent, or ran one before the server restarted:
+-- { session, session_id, window, label, block_id, kind, hub_name, env_hub, state }. state is
+--   ok               the program runs with HUB_NAME = its hub name
+--   restart pending  it runs without HUB_NAME; it gets the name the next time rex-agents starts it
+--   runs as NAME     it runs with another HUB_NAME (set by hand, or shared with another pane)
+--   not saved yet    started since the last save
+--   not running      the pane is an idle shell (⌘⇧B brings it back)
+-- Reads the panes and the last save; changes nothing.
+function M.status()
+  local snap = M.load_snap()
+  local rows = {}
+  for _, v in ipairs(M.snapshot()) do
+    for _, w in ipairs(v.windows) do
+      for _, leaf in ipairs(M.leaves(w.layout)) do
+        local bid = leaf.block_id
+        local saved = snap.panes[bid]
+        local e = M.classify(leaf)
+        local running = e and AGENT_KINDS[e.kind]
+        if running or (saved and AGENT_KINDS[saved.kind]) then
+          local hub, env_hub = saved and saved.hub_name, e and e._env_hub
+          local state
+          if not running then state = "not running"
+          elseif not hub then state = "not saved yet"
+          elseif env_hub == hub then state = "ok"
+          elseif env_hub then state = "runs as " .. env_hub
+          else state = "restart pending" end
+          rows[#rows + 1] = { session = v.label, session_id = v.session_id, window = w.label, label = leaf.label,
+            block_id = bid, kind = running and e.kind or saved.kind, hub_name = hub, env_hub = env_hub, state = state }
+        end
+      end
+    end
+  end
+  table.sort(rows, function(a, b)
+    local ka = { a.session or "", a.window or "", a.label or "", a.block_id }
+    local kb = { b.session or "", b.window or "", b.label or "", b.block_id }
+    for i = 1, 4 do if ka[i] ~= kb[i] then return ka[i] < kb[i] end end
+    return false
+  end)
+  return { rows = rows, saved_at = snap.saved_at, watcher = M.watcher() }
+end
+
+-- Check panes.json, the watcher and (with AGAINST, a copy of panes.json taken before a change)
+-- what changed. Returns { errors = {...}, warnings = {...}, info = {...} }; nothing is written.
+function M.verify(against)
+  local errors, warnings, info = {}, {}, {}
+  local function err(f, ...) errors[#errors + 1] = string.format(f, ...) end
+  local function warn(f, ...) warnings[#warnings + 1] = string.format(f, ...) end
+  local function note(f, ...) info[#info + 1] = string.format(f, ...) end
+  local function where(bid, e)
+    return string.format("%s / %s / %s (%s)", e.session or "?", e.window or "?", e.label or "?", bid)
+  end
+
+  local ok, snap = pcall(M.read_json, M.paths.snap)
+  if not ok or type(snap) ~= "table" or type(snap.panes) ~= "table" then
+    err("%s is missing or not valid JSON", M.paths.snap)
+    return { errors = errors, warnings = warnings, info = info }
+  end
+  local live = M.live_block_ids()
+  local count, agents, holders, no_cmd = 0, 0, {}, 0
+  for bid, e in pairs(snap.panes) do
+    count = count + 1
+    for k in pairs(e) do
+      if type(k) == "string" and k:sub(1, 1) == "_" then err("helper field %s left in %s", k, where(bid, e)) end
+    end
+    if not e.kind then
+      err("no kind: %s", where(bid, e))
+    elseif e.kind ~= "services" and (type(e.revive) ~= "table" or #e.revive == 0) then
+      if e.note then no_cmd = no_cmd + 1 else err("no revive command: %s", where(bid, e)) end
+    end
+    if AGENT_KINDS[e.kind] then
+      if e.hub_name ~= nil and not M.hub_valid(e.hub_name) then err("invalid hub name %q: %s", tostring(e.hub_name), where(bid, e)) end
+      if live[bid] then
+        agents = agents + 1
+        if not e.hub_name then err("live agent without a hub name: %s", where(bid, e)) end
+        if e.hub_name then
+          holders[e.hub_name] = holders[e.hub_name] or {}
+          table.insert(holders[e.hub_name], where(bid, e))
+        end
+      end
+    elseif e.hub_name ~= nil then
+      err("hub name on a %s pane: %s", tostring(e.kind), where(bid, e))
+    end
+  end
+  for name, list in pairs(holders) do
+    if #list > 1 then err("hub name %s is used by %d live panes: %s", name, #list, table.concat(list, "; ")) end
+  end
+  local age = snap.saved_at and (os.time() - snap.saved_at)
+  note("%d entries, %d live agents, last save %s", count, agents, age and (age .. " s ago") or "unknown")
+  if no_cmd > 0 then note("%d panes can't be resumed and are skipped by revive (e.g. Claude Code without a session ID)", no_cmd) end
+  if age and age > 300 then warn("last save was %d s ago (the watcher saves every 2 min)", age) end
+  local server = M.server_id()
+  if server and snap.server and snap.server ~= server then
+    warn("the last save is from before the Rex server restarted (%s, now %s)", snap.server, server)
+  end
+
+  local w = M.watcher()
+  if w then
+    if not w.loaded then err("watcher %s is not loaded (run ./install.sh)", w.label)
+    elseif not w.pid then err("watcher %s is loaded but not running (see ~/Library/Logs/rex-agents.log)", w.label)
+    else note("watcher %s running, pid %d", w.label, w.pid) end
+  end
+
+  if against then
+    local ok2, old = pcall(M.read_json, against)
+    if not ok2 or type(old) ~= "table" or type(old.panes) ~= "table" then
+      err("%s is missing or not valid JSON", against)
+    else
+      -- what each live pane runs now, to tell an exited program from one no longer recognised
+      local fg
+      local function fg_of(bid)
+        if not fg then
+          fg = {}
+          for _, sess in ipairs(M.sessions()) do
+            local v = M.view(sess.session_id)
+            for _, w2 in ipairs(v and v.windows or {}) do
+              for _, leaf in ipairs(M.leaves(w2.layout)) do fg[leaf.block_id] = leaf.fg or "" end
+            end
+          end
+        end
+        return fg[bid]
+      end
+      local n_old, missing, added, changed = 0, 0, 0, 0
+      for bid, o in pairs(old.panes) do
+        n_old = n_old + 1
+        local e = snap.panes[bid]
+        if not e then
+          missing = missing + 1
+          local now_fg = live[bid] and fg_of(bid)
+          if not live[bid] then
+            warn("gone since %s, pane closed: %s %s", against, where(bid, o), tostring(o.kind))
+          elseif now_fg == nil or SHELLS[now_fg] then
+            warn("gone since %s, program exited: %s %s", against, where(bid, o), tostring(o.kind))
+          else
+            err("no longer recognised (pane runs %s): %s %s", now_fg, where(bid, o), tostring(o.kind))
+          end
+        elseif e.kind ~= o.kind then
+          changed = changed + 1
+          err("kind changed %s → %s: %s", tostring(o.kind), tostring(e.kind), where(bid, e))
+        elseif M.join(e.revive or {}) ~= M.join(o.revive or {}) then
+          changed = changed + 1
+          err("revive command changed: %s\n    was: %s\n    now: %s", where(bid, e), M.join(o.revive or {}), M.join(e.revive or {}))
+        end
+      end
+      for bid in pairs(snap.panes) do if not old.panes[bid] then added = added + 1 end end
+      note("against %s: %d → %d entries, %d missing, %d new, %d changed", against, n_old, count, missing, added, changed)
+    end
+  end
+  table.sort(errors)
+  return { errors = errors, warnings = warnings, info = info }
+end
+
 -- ---- revive ----------------------------------------------------------------------------------
 
 function M.type_into(sid, bid, text)
