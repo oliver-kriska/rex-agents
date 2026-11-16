@@ -413,15 +413,33 @@ function M.snapshot()
   return out
 end
 
--- PID + start time of the server; changes when the server restarts. Same format the Python
--- version wrote ("PID@lstart"), so saved alive_on values keep matching.
+-- Identity of the running server; changes when it restarts. Rex's instance_id; servers that don't
+-- report one get "PID@lstart", the format earlier versions (and the Python one) stored.
 function M.server_id()
   local st = rex.call("server.status")
-  local pid = st and st.pid
+  if type(st) ~= "table" then return nil end
+  if type(st.instance_id) == "string" and st.instance_id ~= "" then return st.instance_id end
+  return M.legacy_server_id(st)
+end
+
+-- "PID@lstart" of the server, to recognise alive_on values saved before instance_id was used.
+function M.legacy_server_id(st)
+  st = st or rex.call("server.status")
+  local pid = type(st) == "table" and st.pid
   if not pid then return nil end
   local r = exec({ "ps", "-o", "lstart=", "-p", tostring(pid) })
   if not r or not r.ok then return nil end
   return string.format("%d@%s", pid, trim(r.stdout))
+end
+
+-- Whether a saved alive_on/server value means the server running now (SERVER), also in the legacy
+-- format. LEGACY is computed only when needed and cached in the table CACHE.
+function M.same_server(v, server, cache)
+  if v == nil or server == nil then return false end
+  if v == server then return true end
+  if not v:find("@", 1, true) then return false end
+  if cache.legacy == nil then cache.legacy = M.legacy_server_id() or false end
+  return cache.legacy ~= false and v == cache.legacy
 end
 
 -- ---- processes -------------------------------------------------------------------------------
@@ -780,7 +798,7 @@ function M.save()
     return { skipped = "no sessions visible yet, kept the previous save" }
   end
   local now = os.time()
-  local panes, live, count = {}, {}, 0
+  local panes, live, count, legacy = {}, {}, 0, {}
   for _, v in ipairs(views) do
     for _, w in ipairs(v.windows) do
       for _, leaf in ipairs(M.leaves(w.layout)) do
@@ -795,7 +813,7 @@ function M.save()
         elseif prev then
           -- Forget it only if it ran under THIS server and has since exited: you closed it yourself.
           -- Anything else (server restarted, not revived yet) stays until it is brought back.
-          if not (server and prev.alive_on == server) then panes[bid] = prev end
+          if not M.same_server(prev.alive_on, server, legacy) then panes[bid] = prev end
         end
       end
     end
@@ -805,6 +823,11 @@ function M.save()
     if not live[bid] and now - (prev.seen or 0) < M.config.keep_missing then panes[bid] = prev end
   end
   assign_hub_names(panes, live, old.panes)
+  -- If the server stopped or restarted while we looked, programs that were dying would look like
+  -- programs you exited. Keep the previous save instead.
+  if server and M.server_id() ~= server then
+    return { skipped = "the Rex server stopped or restarted during the scan, kept the previous save" }
+  end
   for _ in pairs(panes) do count = count + 1 end
   if read_file(M.paths.snap) then copy_file(M.paths.snap, M.paths.prev) end
   M.write_json(M.paths.snap, { server = server or old.server, saved_at = now, panes = panes }, "600")
@@ -914,7 +937,7 @@ function M.verify(against)
   if no_cmd > 0 then note("%d panes can't be resumed and are skipped by revive (e.g. Claude Code without a session ID)", no_cmd) end
   if age and age > 300 then warn("last save was %d s ago (the watcher saves every 2 min)", age) end
   local server = M.server_id()
-  if server and snap.server and snap.server ~= server then
+  if server and snap.server and not M.same_server(snap.server, server, {}) then
     warn("the last save is from before the Rex server restarted (%s, now %s)", snap.server, server)
   end
 
@@ -975,6 +998,36 @@ function M.verify(against)
 end
 
 -- ---- revive ----------------------------------------------------------------------------------
+
+-- What a pane is doing now: "idle" (a shell at its prompt), "starting" (the shell isn't up yet),
+-- "busy" (a program runs, or a shell inside another shell), or "gone".
+function M.pane_state(sid, bid)
+  local r = block_call(sid, "process", { block_id = bid })
+  if not r then return "gone" end
+  local fg = r.foreground
+  if not fg then return "starting" end
+  local name = tostring(fg.name or ""):gsub("^%-", "")
+  if (name == "login" or name == "rex") and r.child and fg.pid == r.child.pid then return "starting" end
+  if not SHELLS[fg.name] and not SHELLS[name] then return "busy" end
+  for _, a in ipairs(r.ancestors or {}) do
+    local an = tostring(a.name or ""):gsub("^%-", "")
+    if SHELLS[an] and an ~= "login" then return "busy" end
+  end
+  return "idle"
+end
+
+-- Wait up to WAIT seconds (default 10) for a starting pane, then type TEXT + enter only if the pane
+-- is an idle shell. Returns true, or nil and why not.
+function M.type_if_idle(sid, bid, text, wait)
+  local deadline = os.time() + (wait or 10)
+  local st = M.pane_state(sid, bid)
+  while st == "starting" and os.time() < deadline and rex.sleep do
+    rex.sleep(0.3)
+    st = M.pane_state(sid, bid)
+  end
+  if st ~= "idle" then return nil, "pane is " .. st end
+  return M.type_into(sid, bid, text)
+end
 
 function M.type_into(sid, bid, text)
   local _, err = block_call(sid, "write", { block_id = bid, data = text })

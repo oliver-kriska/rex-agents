@@ -113,6 +113,51 @@ check("layout hub slugged + hold", hl.split.after.block.options.initial_input, "
 check("layout hub renamed", A.rex_layout(htpl, true, function(n) return "p-" .. n end).split.before.block.options.initial_input,
   "HUB_NAME=p-mgr claude\r")
 
+-- save: skipped when the server changes during the scan; legacy alive_on ("PID@lstart") still
+-- counts as the running server. Uses stubs, a scratch state dir, no Rex calls.
+do
+  local tmp = (os.getenv("TMPDIR") or "/tmp"):gsub("/$", "") .. "/rex-agents-unit-" .. os.time()
+  A.exec({ "mkdir", "-p", tmp })
+  local saved = { snap = A.paths.snap, prev = A.paths.prev, snapshot = A.snapshot, server_id = A.server_id,
+    legacy = A.legacy_server_id }
+  A.paths.snap, A.paths.prev = tmp .. "/panes.json", tmp .. "/panes.prev.json"
+  local function idle_view()
+    return { { session_id = "s", label = "S", windows = { { label = "W", layout = { block_id = "b1", fg = "zsh" } } } } }
+  end
+  A.snapshot = idle_view
+  A.legacy_server_id = function() return "123@Mon Nov 16" end
+  local function setup(alive_on)
+    A.write_json(A.paths.snap, { server = alive_on, saved_at = 1, panes = {
+      b1 = { kind = "amp", revive = { "amp" }, alive_on = alive_on, seen = os.time() } } })
+  end
+  local ids
+  A.server_id = function() return table.remove(ids, 1) end
+
+  setup("inst-A"); ids = { "inst-A", nil }
+  check("save skipped when the server goes away", A.save().skipped ~= nil, true)
+  check("previous save kept", A.read_json(A.paths.snap).panes.b1 ~= nil, true)
+
+  setup("inst-A"); ids = { "inst-A", "inst-B" }
+  check("save skipped when the server restarts", A.save().skipped ~= nil, true)
+
+  setup("inst-A"); ids = { "inst-A", "inst-A" }
+  check("exited under this server is dropped", A.save().panes, 0)
+
+  setup("123@Mon Nov 16"); ids = { "inst-A", "inst-A" }
+  check("legacy alive_on of this server is dropped", A.save().panes, 0)
+
+  setup("999@Sun Nov 15"); ids = { "inst-A", "inst-A" }
+  check("legacy alive_on of an older server is kept", A.save().panes, 1)
+
+  check("same_server plain", A.same_server("x", "x", {}), true)
+  check("same_server other uuid", A.same_server("y", "x", {}), false)
+  check("same_server nil", A.same_server(nil, "x", {}), false)
+
+  A.paths.snap, A.paths.prev = saved.snap, saved.prev
+  A.snapshot, A.server_id, A.legacy_server_id = saved.snapshot, saved.server_id, saved.legacy
+  A.exec({ "rm", "-rf", tmp })
+end
+
 -- re-encode real templates for a byte diff against the originals
 if rex.args.templates then
   local r = A.exec({ "ls", "-1", rex.args.templates })

@@ -159,9 +159,20 @@ names | diff - "$T/names1.json" >/dev/null || fail "hub names must survive the r
 "$RA" verify --against "$T/before-restart.json" >/dev/null || { "$RA" verify --against "$T/before-restart.json"; fail "verify --against after restart"; }
 ok "(a) restart: 12 panes kept, new server id, same hub names"
 
+# ---- a shell inside a shell counts as busy: revive skips that pane
+bid_of() { rx block ls -s "$1" --json | jq -r --arg l "$2" '.blocks[] | select(.label == $l) | .block_id' | head -1; }
+rx send -s Proj -b "$(bid_of Proj amp)" $'zsh\r'
+i=0; until [ "$(rx block ls -s Proj --json >/dev/null; pane Proj amp | grep -c 'e2e %')" -ge 2 ] || [ $i -ge 50 ]; do i=$((i + 1)); sleep 0.2; done
+"$RA" revive >"$T/revive0.txt"
+grep -q "^skipped: Proj / Agents: pane is busy" "$T/revive0.txt" || { cat "$T/revive0.txt"; fail "nested shell must be skipped"; }
+[ "$(grep -c '^started:' "$T/revive0.txt")" = 10 ] || { cat "$T/revive0.txt"; fail "expected 10 started next to the nested shell"; }
+rx send -s Proj -b "$(bid_of Proj amp)" $'exit\r'
+sleep 1
+ok "revive re-checks each pane: a nested shell is skipped"
+
 # ---- (b) revive everything
 "$RA" revive >"$T/revive.txt"
-[ "$(grep -c '^started:' "$T/revive.txt")" = 11 ] || { cat "$T/revive.txt"; fail "expected 11 started"; }
+[ "$(grep -c '^started:' "$T/revive.txt")" = 1 ] || { cat "$T/revive.txt"; fail "expected the skipped pane to start now"; }
 grep -q "^services:" "$T/revive.txt" || fail "services action"
 wait_for Proj mgr "argv: \[--dangerously-load-development-channels\] \[server:amp-bridge\] \[--resume\]"
 wait_for Proj amp "argv: \[threads\] \[continue\] \[T-"
@@ -178,7 +189,7 @@ wait_for "Hub Names" shell "^hub=hub-names-claude-"
 "$RA" save >/dev/null
 [ "$(jq -r '[.panes[] | select(.kind != "services")] | map(.alive_on) | unique | length' "$P")" = 1 ] || fail "revived panes are alive on the new server"
 names | diff - "$T/names1.json" >/dev/null || fail "hub names must survive the revive"
-ok "(b) revive: 11 commands typed into the right panes with their HUB_NAME, services action run"
+ok "(b) revive: 10 + 1 commands typed into the right panes with their HUB_NAME, services action run"
 
 # ---- status after the revive: every agent runs with its name
 "$RA" status --json | jq -e '[.panes[] | select(.state != "ok")] | length == 0' >/dev/null \

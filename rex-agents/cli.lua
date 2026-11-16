@@ -117,9 +117,9 @@ local function cmd_revive(a)
   end
   for _, t in ipairs(plan.todo) do
     if chosen[t.bid] then
-      local _, err = A.type_into(t.sid, t.bid, t.line)
-      if err then
-        print("failed: " .. (t.e.session or "") .. " / " .. (t.e.window or "") .. ": " .. tostring(err))
+      local ok, err = A.type_if_idle(t.sid, t.bid, t.line)
+      if not ok then
+        print("skipped: " .. (t.e.session or "") .. " / " .. (t.e.window or "") .. ": " .. tostring(err))
       else
         print("started: " .. (t.e.session or "") .. " / " .. (t.e.window or "") .. " → " .. A.join(t.e.revive):sub(1, 80))
       end

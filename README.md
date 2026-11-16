@@ -79,8 +79,10 @@ and the time of the last save, and exits 1 on a problem. With `--against`, a cop
 `panes.json` taken before a change, it also lists entries that went missing and commands that
 changed; a pane you closed or a program you exited is only a warning.
 
-Revive only types into a pane whose foreground program is a shell, so it never starts anything
-twice.
+Revive only types into a pane whose foreground program is a shell at its prompt, so it never
+starts anything twice. It checks each pane again right before typing (the picker may have been
+open a while), waits up to 10 s for a pane whose shell is still starting, and skips a pane that
+runs a shell inside another shell.
 
 ## How it works
 
@@ -103,9 +105,11 @@ the conversation selector, or `CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS` when Clau
 is the `threads/T-….log` file it holds open (`lsof`).
 
 **Surviving restarts.** `~/.local/state/rex-agents/panes.json` maps block ID → command. Each
-entry records the server it was seen alive on (`PID@start time`). A save:
+entry records the server it was seen alive on (Rex's `instance_id`; entries saved by earlier
+versions hold `PID@start time` and are still recognised). A save:
 
-- skips writing when no session is visible yet (server still starting);
+- skips writing when no session is visible yet (server still starting), or when the server
+  stopped or restarted while it looked (dying programs would look like ones you exited);
 - drops an entry only if its pane is an idle shell *and* it ran under the current server (you
   exited it yourself). After a restart the old entries stay until you revive them;
 - keeps entries whose block is missing for a week;
