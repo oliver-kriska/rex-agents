@@ -17,6 +17,7 @@ int main(int argc, char **argv) {
   printf("FAKE %s pid=%d argv:", prog, getpid());
   for (int i = 1; i < argc; i++) printf(" [%s]", argv[i]);
   printf("\n");
+  printf("hub=%s\n", getenv("HUB_NAME") ? getenv("HUB_NAME") : "-");
   if (strcmp(prog, "claude") == 0) {
     for (int i = 1; i + 1 < argc; i++) if (!strcmp(argv[i], "--resume")) snprintf(id, sizeof id, "%s", argv[i+1]);
     if (!id[0]) uuid(id, 1);
@@ -24,7 +25,10 @@ int main(int argc, char **argv) {
     const char *st = getenv("FAKE_STATUS"); if (!st) st = "idle";
     char p[1024]; snprintf(p, sizeof p, "%s/%d.json", dir, getpid());
     FILE *f = fopen(p, "w");
-    fprintf(f, "{\"pid\":%d,\"sessionId\":\"%s\",\"cwd\":\"%s\",\"status\":\"%s\"}\n", getpid(), id, getcwd(NULL,0), st);
+    const char *nm = getenv("FAKE_NAME"), *ns = getenv("FAKE_NAME_SOURCE");
+    fprintf(f, "{\"pid\":%d,\"sessionId\":\"%s\",\"cwd\":\"%s\",\"status\":\"%s\"", getpid(), id, getcwd(NULL,0), st);
+    if (nm) fprintf(f, ",\"name\":\"%s\",\"nameSource\":\"%s\"", nm, ns ? ns : "user");
+    fprintf(f, "}\n");
     fclose(f);
     printf("session %s\n", id);
   } else if (strcmp(prog, "amp") == 0) {

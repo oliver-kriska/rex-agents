@@ -76,7 +76,7 @@ foreground PID. Its exact argv comes from `procargs.js` (Rex's Lua has no FFI, a
 arguments with spaces, so a quoted prompt would turn into flag values). Claude Code's session ID
 comes from `~/.claude/sessions/<pid>.json`; its launch flags are its argv without the prompt and
 the conversation selector, or `CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS` when Claude Code set it on
-`/restart` (that variable is the only part of a process environment ever read). Amp's thread ID
+`/restart` (that variable and `HUB_NAME` are the only parts of a process environment ever read). Amp's thread ID
 is the `threads/T-….log` file it holds open (`lsof`).
 
 **Surviving restarts.** `~/.local/state/rex-agents/panes.json` maps block ID → command. Each
@@ -90,6 +90,22 @@ entry records the server it was seen alive on (`PID@start time`). A save:
 
 The LaunchAgent keeps the watcher alive (`KeepAlive`). When the server restarts the watcher's
 connection drops, it exits and launchd starts it again.
+
+## Agent names (`HUB_NAME`)
+
+Every Claude Code and Amp pane rex-agents starts (revive, template-open, start-pending) gets
+`HUB_NAME=<name>` in front of its command, for tools that address agents by name (a message hub,
+an MCP server reading `HUB_NAME`). The name is chosen once per pane and then kept across server
+restarts, revives and park/reopen, in `hub_name` in `panes.json` and in templates:
+
+1. the `HUB_NAME` the program already runs with;
+2. the Claude Code session name, if you set it (`/rename worker chief 2` → `worker-chief-2`);
+3. the pane label, unless it's a generic one such as `shell`;
+4. `<session>-<kind>-<last 6 characters of the block ID>`.
+
+Names are unique among live panes: a taken one gets the session name in front. Names follow
+`[A-Za-z0-9][A-Za-z0-9._-]*`, at most 64 characters. A program that is already running keeps
+its environment; it gets the name the next time rex-agents starts it.
 
 ## Templates
 
@@ -119,6 +135,9 @@ connection drops, it exits and launchd starts it again.
 
 - `cmd` starts the pane fresh; `resume` (written by park) continues the same conversation.
 - `hold: true` types the command without pressing enter.
+- `hub_name` (agents only) is the pane's `HUB_NAME`. A hand-written one is kept when you save the
+  template again (for labelled panes). If a live pane already uses it when the template opens, the
+  session name goes in front.
 - Saving again keeps a hand-written `cmd`/`hold` of a labelled pane whose program it can't
   recognise.
 

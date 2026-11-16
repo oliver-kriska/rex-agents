@@ -78,6 +78,41 @@ check("layout cwd", fresh.split.before.block.options.cwd, os.getenv("HOME") .. "
 check("layout label", fresh.split.after.block.label, "hub")
 check("has_resume", A.template_has_resume({ windows = { { layout = tpl } } }), true)
 
+-- hub names
+check("hub valid", A.hub_valid("worker-chief-2"), true)
+check("hub valid upper/dot", A.hub_valid("A.b_c-1"), true)
+check("hub invalid start", A.hub_valid("-x"), false)
+check("hub invalid char", A.hub_valid("a b"), false)
+check("hub invalid long", A.hub_valid(string.rep("a", 65)), false)
+check("hub slug", A.hub_slug("Worker Chief 2"), "worker-chief-2")
+check("hub slug edges", A.hub_slug("  --PR Marmot: iOS!! "), "pr-marmot-ios")
+check("hub slug long", #A.hub_slug(string.rep("ab ", 40)), 64)
+check("hub slug long, cut on a dash", #A.hub_slug(string.rep("abc ", 20)), 63)
+local BID = "block:01a1e364-cfef-7b46-80fa-e55309b92a10"
+check("hub rule 1 user name", A.hub_pick({ kind = "claude", session = "Chief", label = "shell",
+  _name = "chief manager", _name_source = "user" }, BID, {}), "chief-manager")
+check("hub rule 1 skips derived", A.hub_pick({ kind = "claude", session = "Chief", label = "shell",
+  _name = "rex-agents-e5", _name_source = "derived" }, BID, {}), "chief-claude-b92a10")
+check("hub rule 2 label", A.hub_pick({ kind = "amp", session = "PR Marmot", label = "PR Marmot iOS" }, BID, {}), "pr-marmot-ios")
+check("hub rule 3", A.hub_pick({ kind = "amp-runner", session = "Enaia - main", label = "shell" }, BID, {}), "enaia-main-amp-runner-b92a10")
+check("hub collision → session prefix", A.hub_pick({ kind = "claude", session = "Enaia - main", label = "server" }, BID,
+  { server = true }), "enaia-main-server")
+check("hub collision, prefix taken too", A.hub_pick({ kind = "claude", session = "Proj", label = "mgr" }, BID,
+  { mgr = true, ["proj-mgr"] = true }), "proj-claude-b92a10")
+check("hub rule 3 long session", #A.hub_pick({ kind = "claude", session = string.rep("x", 80) }, BID, {}) <= 64, true)
+check("hub prefix", A.hub_prefix({ kind = "claude", hub_name = "mgr" }), "HUB_NAME=mgr ")
+check("hub prefix not an agent", A.hub_prefix({ kind = "btop", hub_name = "mgr" }), "")
+check("key order hub_name", A.encode({ hub_name = "h", hold = true, cmd = "c", label = "l" }),
+  "{\n  \"label\": \"l\",\n  \"cmd\": \"c\",\n  \"hold\": true,\n  \"hub_name\": \"h\"\n}")
+local htpl = { split = { direction = "horizontal", ratio = 0.5,
+  before = { block = { cmd = "claude", resume = "claude --resume X", hub_name = "mgr" } },
+  after = { block = { cmd = "amp", hub_name = "Bad Name!", hold = true } } } }
+local hl = A.rex_layout(htpl, false)
+check("layout hub resume", hl.split.before.block.options.initial_input, "HUB_NAME=mgr claude --resume X\r")
+check("layout hub slugged + hold", hl.split.after.block.options.initial_input, "HUB_NAME=bad-name amp")
+check("layout hub renamed", A.rex_layout(htpl, true, function(n) return "p-" .. n end).split.before.block.options.initial_input,
+  "HUB_NAME=p-mgr claude\r")
+
 -- re-encode real templates for a byte diff against the originals
 if rex.args.templates then
   local r = A.exec({ "ls", "-1", rex.args.templates })

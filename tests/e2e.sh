@@ -6,7 +6,8 @@
 #   - "restarts" by sending SIGTERM to that server's PID only, after checking its command line
 #   - runs fake `claude` / `amp` binaries (tests/fake.c), never the real ones
 #
-# Covers: save → server restart → revive; park → reopen with conversations; template round trip.
+# Covers: save → server restart → revive; park → reopen with conversations; template round trip;
+# HUB_NAME names (chosen once, kept across restart/revive/park, made unique on template-open).
 # Usage: tests/e2e.sh            (needs cc, jq, fzf not required)
 set -eu
 
@@ -96,45 +97,75 @@ assert(rex.call("session.create", { label = "Proj", initial_windows = {
         v(b("plain", W .. "/plain", nil), b("oneshot", W .. "/plain", "amp -x 'one shot'"))))) } } }))
 assert(rex.call("session.create", { label = "Park Me", initial_windows = {
   { window_label = "Work", layout = h(b("busy", W .. "/plain", "FAKE_STATUS=busy claude --model opus"), b("thread", W .. "/plain", "amp")) } } }))
+assert(rex.call("session.create", { label = "Hub Names", initial_windows = {
+  { window_label = "Names", layout = h(
+    h(b("named", W .. "/plain", "FAKE_NAME='worker chief 2' claude"), b("shell", W .. "/plain", "FAKE_NAME=auto-x FAKE_NAME_SOURCE=derived claude")),
+    h(b("mgr", W .. "/plain", "claude"), b("envd", W .. "/plain", "HUB_NAME=from-env claude"))) } } }))
 EOF
 rx do "$T/fixture.lua" >/dev/null
 wait_for Proj mgr "^session "
 wait_for Proj amp "^thread "
 wait_for "Park Me" busy "^session "
+wait_for "Hub Names" envd "^session "
 
 # ---- save
-"$RA" save | grep -q "saved 8 panes" || { jq -c "[.panes[].label]" "$T/agents/panes.json"; fail "expected 8 saved panes"; }
+"$RA" save | grep -q "saved 12 panes" || { jq -c "[.panes[].label]" "$T/agents/panes.json"; fail "expected 12 saved panes"; }
 P="$T/agents/panes.json"
 jq -e '[.panes[] | select(.label == "mgr")][0].revive | index("do the thing") == null and .[1] == "--dangerously-load-development-channels" and .[2] == "server:amp-bridge" and .[3] == "--resume"' "$P" >/dev/null \
   || fail "quoted prompt must be dropped, flags kept"
 jq -e '[.panes[] | select(.label == "restarted")][0].fresh == ["claude","--model","opus","--add-dir","/tmp"]' "$P" >/dev/null || fail "/restart hint flags"
 jq -e '[.panes[] | select(.label == "runner")][0].revive == ["amp","--no-tui","--runner-id","r1"]' "$P" >/dev/null || fail "amp runner"
 jq -e '[.panes[] | select(.label == "oneshot" or .label == "plain")] | length == 0' "$P" >/dev/null || fail "one-shot amp and plain shells are not saved"
-ok "save: 8 panes, exact argv, hint flags, runner, skips"
+ok "save: 12 panes, exact argv, hint flags, runner, skips"
 
+# ---- hub names, chosen on the first save
+hub() { jq -r --arg s "$1" --arg l "$2" '[.panes[] | select(.session == $s and .label == $l)][0].hub_name' "$P"; }
+expect_hub() { got=$(hub "$1" "$2"); echo "$got" | grep -Eq "^$3\$" || fail "hub name of $1/$2: got $got, want $3"; }
+expect_hub "Hub Names" named "worker-chief-2"           # 1: Claude session name you set
+expect_hub "Hub Names" shell "hub-names-claude-[0-9a-z]{6}" # 3: derived name, generic label
+expect_hub "Hub Names" mgr "mgr"                         # 2: label (sessions are named in order)
+expect_hub Proj mgr "proj-mgr"                           #    taken → session name in front
+expect_hub "Hub Names" envd "from-env"                   # 0: HUB_NAME it already runs with
+expect_hub Proj amp "proj-amp-[0-9a-z]{6}"
+expect_hub Proj runner "runner"
+expect_hub "Park Me" busy "busy"
+jq -e '[.panes[] | select(.kind == "services" or .kind == "labelled") | .hub_name] | all(. == null)' "$P" >/dev/null || fail "only agents get hub names"
+jq -e '[.panes[].hub_name | select(.)] | length == (unique | length)' "$P" >/dev/null || fail "hub names must be unique"
+jq -e '[.panes[] | keys[] | select(startswith("_"))] | length == 0' "$P" >/dev/null || fail "helper fields leaked into panes.json"
+names() { jq -S '[.panes | to_entries[] | {b: .key, h: .value.hub_name}] | sort_by(.b)' "$P"; }
+names >"$T/names1.json"
+ok "hub names: session name, label, block id, collisions, env"
 # ---- (a) restart the server: panes come back as empty shells under the same block IDs
 OLD_SERVER=$(jq -r .server "$P")
 stop_server
 start_server
 "$RA" save >/dev/null
-[ "$(jq '.panes | length' "$P")" = 8 ] || fail "restart must keep every saved pane"
+[ "$(jq '.panes | length' "$P")" = 12 ] || fail "restart must keep every saved pane"
 [ "$(jq -r .server "$P")" != "$OLD_SERVER" ] || fail "server id must change on restart"
-[ "$("$RA" revive --dry-run | grep -vc "^services:")" = 7 ] || fail "7 panes must be revivable after the restart"
-ok "(a) restart: 8 panes kept, new server id"
+[ "$("$RA" revive --dry-run | grep -vc "^services:")" = 11 ] || fail "11 panes must be revivable after the restart"
+names | diff - "$T/names1.json" >/dev/null || fail "hub names must survive the restart"
+ok "(a) restart: 12 panes kept, new server id, same hub names"
 
 # ---- (b) revive everything
 "$RA" revive >"$T/revive.txt"
-[ "$(grep -c '^started:' "$T/revive.txt")" = 7 ] || { cat "$T/revive.txt"; fail "expected 7 started"; }
+[ "$(grep -c '^started:' "$T/revive.txt")" = 11 ] || { cat "$T/revive.txt"; fail "expected 11 started"; }
 grep -q "^services:" "$T/revive.txt" || fail "services action"
 wait_for Proj mgr "argv: \[--dangerously-load-development-channels\] \[server:amp-bridge\] \[--resume\]"
 wait_for Proj amp "argv: \[threads\] \[continue\] \[T-"
 wait_for Proj runner "argv: \[--no-tui\] \[--runner-id\] \[r1\]"
 wait_for Proj restarted "argv: \[--model\] \[opus\] \[--add-dir\] \[/tmp\] \[--resume\] \[11111111-2222-3333-4444-555555555555\]"
 pane Proj plain | grep -q FAKE && fail "plain shell must stay empty"
+wait_for Proj mgr "^hub=proj-mgr$"
+wait_for Proj amp "^hub=proj-amp-"
+wait_for Proj runner "^hub=runner$"
+wait_for "Hub Names" named "^hub=worker-chief-2$"
+wait_for "Hub Names" envd "^hub=from-env$"
+wait_for "Hub Names" shell "^hub=hub-names-claude-"
 "$RA" revive --dry-run | grep -q "^services:" || true
 "$RA" save >/dev/null
 [ "$(jq -r '[.panes[] | select(.kind != "services")] | map(.alive_on) | unique | length' "$P")" = 1 ] || fail "revived panes are alive on the new server"
-ok "(b) revive: 7 commands typed into the right panes, services action run"
+names | diff - "$T/names1.json" >/dev/null || fail "hub names must survive the revive"
+ok "(b) revive: 11 commands typed into the right panes with their HUB_NAME, services action run"
 
 # ---- (c) park and reopen
 PARK=$(rx ls --json | jq -r '.sessions[] | select(.label == "Park Me") | .session_id')
@@ -142,11 +173,13 @@ echo y | "$RA" park "$PARK" >"$T/park.txt"
 grep -q "Reopen later with" "$T/park.txt" || fail "park hint"
 rx ls --json | jq -e '[.sessions[] | select(.label == "Park Me")] | length == 0' >/dev/null || fail "park must close the session"
 jq -e '.windows[0].layout.split.before.block.resume | test("^claude --model opus --resume ")' "$T/templates/park-me.json" >/dev/null || fail "template resume"
+jq -e '.windows[0].layout.split.before.block.hub_name == "busy" and .windows[0].layout.split.after.block.hub_name == "thread"' "$T/templates/park-me.json" >/dev/null || fail "template hub names"
 "$RA" template-open park-me >/dev/null
 wait_for "Park Me" busy "argv: \[--model\] \[opus\] \[--resume\]"
 wait_for "Park Me" thread "argv: \[threads\] \[continue\] \[T-"
+wait_for "Park Me" busy "^hub=busy$"
 "$RA" template-open park-me | grep -q "already open" || fail "already-open guard"
-ok "(c) park + reopen: conversations continue"
+ok "(c) park + reopen: conversations continue, same hub names"
 
 # ---- templates keep hand-written cmd/hold
 PROJ=$(rx ls --json | jq -r '.sessions[] | select(.label == "Proj") | .session_id')
@@ -155,7 +188,23 @@ jq '(.. | objects | select(.label? == "oneshot")) |= (.cmd = "echo hold" | .hold
 "$RA" template-save "$PROJ" >/dev/null
 jq -e '[.. | objects | select(.label? == "oneshot")][0] | .cmd == "echo hold" and .hold == true' "$T/templates/proj.json" >/dev/null || fail "hold kept"
 jq -e '[.. | objects | select(.label? == "iex")][0].cmd == "iex -S mix phx.server"' "$T/templates/proj.json" >/dev/null || fail "services cmd"
-ok "templates: hand-written cmd/hold kept, services command"
+jq '(.. | objects | select(.label? == "mgr")) |= (.hub_name = "custom-mgr")' "$T/templates/proj.json" >"$T/p.json" && mv "$T/p.json" "$T/templates/proj.json"
+"$RA" template-save "$PROJ" >/dev/null
+jq -e '[.. | objects | select(.label? == "mgr")][0].hub_name == "custom-mgr"' "$T/templates/proj.json" >/dev/null || fail "hand-written hub name kept"
+ok "templates: hand-written cmd/hold/hub_name kept, services command"
+
+# ---- a template opened next to the session it was saved from: taken names get the new session's name
+HUBS=$(rx ls --json | jq -r '.sessions[] | select(.label == "Hub Names") | .session_id')
+"$RA" template-save "$HUBS" >/dev/null
+jq '.name = "Hub Copy"' "$T/templates/hub-names.json" >"$T/h.json" && mv "$T/h.json" "$T/templates/hub-names.json"
+"$RA" template-open hub-names --fresh >/dev/null
+wait_for "Hub Copy" named "^hub=hub-copy-worker-chief-2$"
+wait_for "Hub Copy" mgr "^hub=hub-copy-mgr$"
+"$RA" save >/dev/null
+# unique among live panes (the parked session's old blocks keep their names for a week; seen is older)
+jq -e '([.panes[].seen] | max) as $m | [.panes[] | select(.seen == $m) | .hub_name | select(.)] | length == (unique | length)' "$P" >/dev/null \
+  || { jq -c '[.panes[] | {session, label, hub_name, seen}]' "$P"; fail "hub names unique after template-open"; }
+ok "template-open: taken hub names get the session name in front"
 
 "$REX" --autostart=false -S "$URL" do "$ROOT/tests/unit.lua" | tail -1
 echo "all e2e checks passed"

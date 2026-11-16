@@ -202,7 +202,7 @@ for i, k in ipairs({
   -- a saved pane
   "kind", "fresh", "revive", "note", "session_id", "session", "window",
   -- a template block (label/cwd are also the next keys of a saved pane), window, split
-  "label", "cwd", "cmd", "resume", "hold", "layout", "split", "block", "direction", "ratio", "before", "after",
+  "label", "cwd", "cmd", "resume", "hold", "hub_name", "layout", "split", "block", "direction", "ratio", "before", "after",
   -- rest of a saved pane
   "seen", "alive_on",
 }) do KEY_ORDER[k] = i end
@@ -427,11 +427,11 @@ end
 -- ---- processes -------------------------------------------------------------------------------
 
 -- Exact argv comes from procargs.js (sysctl KERN_PROCARGS2 through osascript), one call for all
--- the panes of a snapshot. The only environment variable read is Claude Code's relaunch hint; the
--- rest of a process's environment is never read or stored.
+-- the panes of a snapshot. The only environment variables read are Claude Code's relaunch hint and
+-- HUB_NAME; the rest of a process's environment is never read or stored.
 local HERE = (debug.getinfo(1, "S").source:match("^@?(.*)/[^/]+$")) or "."
 local PROCARGS = HERE .. "/procargs.js"
-local ENV_WANTED = { "CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS" }
+local ENV_WANTED = { "CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS", "HUB_NAME" }
 local proc_cache = {}
 
 function M.prefetch(pids, keep)
@@ -546,7 +546,8 @@ local function claude_entry(pid, argv)
   local sid = d and d.sessionId
   local fresh = concat({ "claude" }, flags)
   return { kind = "claude", fresh = fresh, revive = sid and concat(fresh, { "--resume", sid }) or nil,
-    note = (not sid) and "no session ID found" or nil }
+    note = (not sid) and "no session ID found" or nil,
+    _name = d and d.name, _name_source = d and d.nameSource }
 end
 
 -- ---- Amp -------------------------------------------------------------------------------------
@@ -618,13 +619,147 @@ function M.classify(leaf)
   local argv = M.argv(pid)
   if not argv then return nil end
   local prog = basename(argv[1])
-  if prog == "claude" then return claude_entry(pid, argv) end
-  if prog == "amp" then return amp_entry(pid, argv) end
+  local e
+  if prog == "claude" then e = claude_entry(pid, argv) elseif prog == "amp" then e = amp_entry(pid, argv) end
+  if e then
+    e._env_hub = M.proc_env(pid, "HUB_NAME") -- set when rex-agents started it
+    return e
+  end
   if VIEWERS[prog] then
     local a = concat({ prog }, slice(argv, 2))
     return { kind = prog, fresh = a, revive = a }
   end
   return nil
+end
+
+-- ---- hub names -------------------------------------------------------------------------------
+--
+-- Every Claude Code / Amp pane rex-agents starts gets HUB_NAME=<name> in front of its command, a
+-- name the pane keeps across restarts and revives (it owns an inbox on the hub). It is chosen once
+-- and stored as hub_name in panes.json and in templates:
+--   0. HUB_NAME the running program already has (only if no other pane has the same one)
+--   1. the Claude Code session name, if you set it yourself (/rename): "worker chief 2" → worker-chief-2
+--   2. the pane label, unless it is a generic one like "shell"
+--   3. <session>-<kind>-<last 6 characters of the block ID>
+-- Names must be unique among live panes; a taken one is tried again with the session name in front.
+
+local AGENT_KINDS = set_of({ "claude", "amp", "amp-runner" })
+M.AGENT_KINDS = AGENT_KINDS
+local GENERIC_LABELS = set_of({ "shell", "terminal", "claude", "amp" })
+
+-- The hub's rule: a letter or digit, then letters, digits, ".", "_" or "-"; at most 64.
+function M.hub_valid(s)
+  return type(s) == "string" and #s <= 64 and s:match("^[A-Za-z0-9][A-Za-z0-9._-]*$") ~= nil
+end
+
+function M.hub_slug(s)
+  local r = tostring(s or ""):lower():gsub("[^a-z0-9._-]+", "-"):gsub("%-%-+", "-"):gsub("^[^a-z0-9]+", "")
+  r = r:sub(1, 64):gsub("[-._]+$", "")
+  return r
+end
+
+-- A new name for agent entry E in block BID, not in TAKEN (rules 1-3 above).
+function M.hub_pick(e, bid, taken)
+  local sess = M.hub_slug(e.session or "")
+  local cands = {}
+  if e._name and e._name_source == "user" then cands[#cands + 1] = M.hub_slug(e._name) end
+  local l = e.label
+  if l and l ~= "" and not GENERIC_LABELS[l:lower()] and not SHELLS[l] then cands[#cands + 1] = M.hub_slug(l) end
+  local tries = {}
+  for _, c in ipairs(cands) do
+    if c ~= "" then
+      tries[#tries + 1] = c
+      if sess ~= "" and c ~= sess and not starts_with(c, sess .. "-") then tries[#tries + 1] = M.hub_slug(sess .. "-" .. c) end
+    end
+  end
+  local tail = "-" .. M.hub_slug(e.kind) .. "-" .. (tostring(bid):gsub("[^%w]", "")):sub(-6):lower()
+  local head = (sess ~= "" and sess or "pane"):sub(1, 64 - #tail):gsub("[-._]+$", "")
+  local base = head .. tail
+  tries[#tries + 1] = base
+  for _, t in ipairs(tries) do
+    if M.hub_valid(t) and not taken[t] then return t end
+  end
+  local i = 2
+  while taken[base:sub(1, 60) .. "-" .. i] do i = i + 1 end
+  return base:sub(1, 60) .. "-" .. i
+end
+
+-- Give every live agent entry in PANES a hub_name (see the rules above) and drop the helper
+-- fields classify added. OLD is the previous save's panes; LIVE the block IDs on screen.
+local function assign_hub_names(panes, live, old)
+  local agents = {}
+  for bid in pairs(live) do
+    local e = panes[bid]
+    if e and AGENT_KINDS[e.kind] then agents[#agents + 1] = bid end
+  end
+  table.sort(agents, function(a, b)
+    local sa, sb = panes[a].session or "", panes[b].session or ""
+    if sa ~= sb then return sa < sb end
+    return a < b
+  end)
+  local env_count = {}
+  for _, bid in ipairs(agents) do
+    local n = panes[bid]._env_hub
+    if n then env_count[n] = (env_count[n] or 0) + 1 end
+  end
+  local taken, rest, need = {}, {}, {}
+  for _, bid in ipairs(agents) do -- 0: what the program runs with
+    local e = panes[bid]
+    local n = e._env_hub
+    if M.hub_valid(n) and env_count[n] == 1 and not taken[n] then
+      e.hub_name = n
+      taken[n] = true
+    else
+      rest[#rest + 1] = bid
+    end
+  end
+  for _, bid in ipairs(rest) do -- the name chosen before
+    local e, prev = panes[bid], old[bid]
+    local n = e.hub_name or (prev and prev.hub_name)
+    if M.hub_valid(n) and not taken[n] then
+      e.hub_name = n
+      taken[n] = true
+    else
+      e.hub_name = nil
+      need[#need + 1] = bid
+    end
+  end
+  for _, bid in ipairs(need) do -- 1-3: a new one
+    local n = M.hub_pick(panes[bid], bid, taken)
+    panes[bid].hub_name = n
+    taken[n] = true
+  end
+  for _, e in pairs(panes) do e._name, e._name_source, e._env_hub = nil, nil, nil end
+end
+
+-- "HUB_NAME=<name> " for an agent entry, else "".
+function M.hub_prefix(e)
+  if e and AGENT_KINDS[e.kind] and M.hub_valid(e.hub_name) then return "HUB_NAME=" .. e.hub_name .. " " end
+  return ""
+end
+
+-- Block IDs of every pane in every session (tiled and floating), without reading the panes.
+function M.live_block_ids()
+  local ids = {}
+  for _, s in ipairs(M.sessions()) do
+    local v = M.raw_view(s.session_id)
+    for _, w in ipairs(v and v.windows or {}) do
+      for _, l in ipairs(w.layers or {}) do
+        for _, b in ipairs(l.blocks or {}) do ids[b.block_id] = true end
+      end
+    end
+  end
+  return ids
+end
+
+-- Names held by live agent panes (from the last save).
+function M.live_hub_names(snap)
+  snap = snap or M.load_snap().panes
+  local live, taken = M.live_block_ids(), {}
+  for bid, e in pairs(snap) do
+    if live[bid] and AGENT_KINDS[e.kind] and e.hub_name then taken[e.hub_name] = true end
+  end
+  return taken
 end
 
 -- ---- save ------------------------------------------------------------------------------------
@@ -669,6 +804,7 @@ function M.save()
     -- block not visible right now (server still starting, session hidden): keep it for a while
     if not live[bid] and now - (prev.seen or 0) < M.config.keep_missing then panes[bid] = prev end
   end
+  assign_hub_names(panes, live, old.panes)
   for _ in pairs(panes) do count = count + 1 end
   if read_file(M.paths.snap) then copy_file(M.paths.snap, M.paths.prev) end
   M.write_json(M.paths.snap, { server = server or old.server, saved_at = now, panes = panes }, "600")
@@ -702,7 +838,8 @@ function M.revive_plan()
           services[#services + 1] = l.sid
         end
       elseif SHELLS[l.leaf.fg] and e.revive and #e.revive > 0 then
-        local line = e.cwd and (" cd " .. M.quote(e.cwd) .. " && " .. M.join(e.revive)) or (" " .. M.join(e.revive))
+        local cmd = M.hub_prefix(e) .. M.join(e.revive)
+        local line = e.cwd and (" cd " .. M.quote(e.cwd) .. " && " .. cmd) or (" " .. cmd)
         todo[#todo + 1] = { bid = bid, sid = l.sid, e = e, line = line }
       end
     end
@@ -719,8 +856,9 @@ end
 
 function M.revive_row(t)
   local e = t.e
-  return string.format("%-14s %-16s %s%s", (e.session or ""):sub(1, 14), (e.window or ""):sub(1, 16),
-    M.join(e.revive):sub(1, 110), e.note and ("  (" .. e.note .. ")") or "")
+  return string.format("%-14s %-16s %s%s%s", (e.session or ""):sub(1, 14), (e.window or ""):sub(1, 16),
+    M.join(e.revive):sub(1, 110), M.hub_prefix(e) ~= "" and ("  [" .. e.hub_name .. "]") or "",
+    e.note and ("  (" .. e.note .. ")") or "")
 end
 
 function M.run_services(sid)
@@ -760,7 +898,7 @@ local function services_cmd(leaf)
   return nil
 end
 
-local function tpl_node(node, old_blocks)
+local function tpl_node(node, old_blocks, hub_for)
   if not node then return nil end
   if node.block_id then
     local e = M.classify(node)
@@ -775,15 +913,17 @@ local function tpl_node(node, old_blocks)
       b.resume = M.join(e.revive) -- same conversation; "cmd" starts a new one
     end
     local old = node.label and old_blocks[node.label]
+    if e and AGENT_KINDS[e.kind] then b.hub_name = hub_for(node, e, old) end
     if old and not b.cmd and old.cmd then -- keep hand-written commands of labelled panes
       b.cmd = old.cmd
       if old.hold then b.hold = true end
+      b.hub_name = old.hub_name
     end
     if node.label and node.label ~= "shell" then b.label = node.label end
     return { block = b }
   end
   return { split = { direction = node.direction, ratio = node.ratio or 0.5,
-    before = tpl_node(node.before, old_blocks), after = tpl_node(node.after, old_blocks) } }
+    before = tpl_node(node.before, old_blocks, hub_for), after = tpl_node(node.after, old_blocks, hub_for) } }
 end
 
 function M.template_path(name) return M.paths.templates .. "/" .. M.slug(name) .. ".json" end
@@ -836,9 +976,24 @@ function M.template_save(sid, name, window_id, v)
   if okt and type(old) == "table" then
     for _, w in ipairs(old.windows or {}) do tpl_blocks(w.layout, old_blocks) end
   end
+  -- hub name of an agent pane: a hand-written one in the old template wins, then what the program
+  -- runs with, then the one the last save chose, else a new one
+  local snap = M.load_snap().panes
+  local taken = M.live_hub_names(snap)
+  local function hub_for(node, e, old)
+    if old and old.hub_name then return old.hub_name end
+    local env = node.pid and M.proc_env(node.pid, "HUB_NAME")
+    if M.hub_valid(env) then return env end
+    local s = snap[node.block_id]
+    if s and M.hub_valid(s.hub_name) then return s.hub_name end
+    local n = M.hub_pick({ kind = e.kind, label = node.label, session = v.label, _name = e._name,
+      _name_source = e._name_source }, node.block_id, taken)
+    taken[n] = true
+    return n
+  end
   local tw = {}
   for _, w in ipairs(wins) do
-    local entry = { layout = tpl_node(w.layout, old_blocks) }
+    local entry = { layout = tpl_node(w.layout, old_blocks, hub_for) }
     if not is_default_window_label(w.label) then entry.label = w.label end
     tw[#tw + 1] = entry
   end
@@ -848,13 +1003,19 @@ function M.template_save(sid, name, window_id, v)
   return { saved = home_tilde(path), windows = #tw, name = name }
 end
 
-local function rex_layout(node, fresh)
+-- HUB(name) → the name to use (template_open makes taken names unique); nil = use as written.
+local function rex_layout(node, fresh, hub)
   if node.block then
     local b = node.block
     local opts = {}
     if b.cwd then opts.cwd = expand_home(b.cwd) end
     local cmd
     if fresh then cmd = b.cmd else cmd = b.resume or b.cmd end
+    if cmd and b.hub_name then
+      local n = hub and hub(b.hub_name) or b.hub_name
+      if not M.hub_valid(n) then n = M.hub_slug(n) end
+      if n ~= "" then cmd = "HUB_NAME=" .. n .. " " .. cmd end
+    end
     if cmd then opts.initial_input = b.hold and cmd or (cmd .. "\r") end -- hold: typed, not run
     local out = { flavor = SHELL_FLAVOR, options = opts }
     if b.label and b.label ~= "shell" then out.label = b.label end
@@ -862,7 +1023,7 @@ local function rex_layout(node, fresh)
   end
   local s = node.split
   return { split = { direction = s.direction, ratio = s.ratio or 0.5,
-    before = rex_layout(s.before, fresh), after = rex_layout(s.after, fresh) } }
+    before = rex_layout(s.before, fresh, hub), after = rex_layout(s.after, fresh, hub) } }
 end
 M.rex_layout = rex_layout
 
@@ -888,9 +1049,21 @@ function M.template_open(name, fresh)
   if M.session_by_label(tpl.name) then
     return nil, string.format("A session named %q is already open; switch to it with ⌘K.", tpl.name)
   end
+  -- a name a live pane already uses gets the session name in front (then -2, -3…)
+  local taken, sess = M.live_hub_names(), M.hub_slug(tpl.name)
+  local function hub(n)
+    if not M.hub_valid(n) then n = M.hub_slug(n) end
+    if n == "" then return n end
+    local t = n
+    if taken[t] and sess ~= "" and not starts_with(t, sess .. "-") then t = M.hub_slug(sess .. "-" .. n) end
+    local i = 2
+    while taken[t] do t = n:sub(1, 60) .. "-" .. i; i = i + 1 end
+    taken[t] = true
+    return t
+  end
   local wins = {}
   for _, w in ipairs(tpl.windows or {}) do
-    wins[#wins + 1] = { window_label = w.label, layout = rex_layout(w.layout, fresh) }
+    wins[#wins + 1] = { window_label = w.label, layout = rex_layout(w.layout, fresh, hub) }
   end
   local r, err = rex.call("session.create", { label = tpl.name, initial_windows = wins })
   if not r then error("session.create: " .. tostring(err), 0) end
@@ -937,7 +1110,7 @@ function M.tab_to_session(sid, window_id, name)
   local function build(n)
     if n.block_id then
       local e = snap[n.block_id] or {}
-      local cmd = (e.revive and e.kind ~= "services") and M.join(e.revive) or nil
+      local cmd = (e.revive and e.kind ~= "services") and (M.hub_prefix(e) .. M.join(e.revive)) or nil
       local opts = { cwd = n.cwd or HOME }
       if cmd then opts.initial_input = cmd end
       local b = { flavor = SHELL_FLAVOR, options = opts }
