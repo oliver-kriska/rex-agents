@@ -1,0 +1,156 @@
+# rex-agents
+
+Bring your coding agents back after a [Rex](https://www.superlogical.com/rex/) server restart, and
+open whole projects (tabs, splits, agents) from hand-editable templates.
+
+Rex restores sessions, tabs, splits, pane labels and working directories after a restart, under
+the same block IDs, but not the programs that ran in them. rex-agents remembers what ran in each
+pane and types it back:
+
+- **Claude Code**: `claude <the flags it was started with> --resume <session id>`
+- **Amp**: `amp threads continue <thread id>`; `--no-tui` runners with their own arguments
+- **viewers** you list (`btop`, `lazygit`, …) with their arguments
+- **labelled panes**: a pane known by its label and directory gets a fixed command
+- **service panes**: run one of your init.lua actions for the session
+
+It's written in Lua and runs inside Rex (`rex do` scripts and init.lua actions). It needs no
+Python, Node or other runtime: only what macOS ships (`ps`, `lsof`, `osascript`) plus `fzf` for
+the pickers.
+
+## Install
+
+```sh
+git clone … ~/src/rex-agents && cd ~/src/rex-agents
+./install.sh            # or ./install.sh --dry-run
+```
+
+`install.sh` links `~/.config/rex/rex-agents` and `~/.config/rex/bin/rex-agents` to the
+checkout, copies `examples/rex-agents.local.lua` to `~/.config/rex/` if you have none, and loads
+a LaunchAgent that runs the watcher. Then add one line to `~/.config/rex/init.lua`:
+
+```lua
+require("rex-agents.actions"){}
+-- or choose keys:  require("rex-agents.actions"){ keys = { revive = "cmd+shift+b", open = "cmd+shift+t" } }
+```
+
+and run `rex config reload`.
+
+## Use
+
+| Key / palette | What it does |
+| --- | --- |
+| ⌘⇧B · *Agents: Bring Back After Restart* | Lists the saved agents whose panes are idle shells now; enter types their commands back. |
+| ⌘⇧T · *Agents: Open Project Template* | Opens a template as a new session, with fresh agents or (for parked projects) the same conversations. |
+| *Agents: Save Session as Template* / *Save Tab as Template* | Writes `~/.config/rex/templates/NAME.json` from what runs now. |
+| *Agents: Park Session* | Saves the session as a template that continues its conversations, warns about Claude turns still running, then asks before closing it. |
+
+The same from a shell:
+
+```
+rex-agents save
+rex-agents revive [--pick|--dry-run]
+rex-agents template-save SESSION_ID [NAME] [--window WINDOW_ID]
+rex-agents template-open [NAME|--pick] [--fresh]
+rex-agents park SESSION_ID [NAME]
+rex-agents template-list
+rex-agents tab-to-session SESSION_ID WINDOW_ID NAME   # then: rex-agents start-pending NAME
+```
+
+Revive only types into a pane whose foreground program is a shell, so it never starts anything
+twice.
+
+## How it works
+
+```
+rex-agents/
+  core.lua      everything: classify panes, save, revive, templates (works in init.lua and rex do)
+  cli.lua       the commands above, run by `rex do` (bin/rex-agents is a thin sh wrapper)
+  watch.lua     long-running `rex do --all` script: saves at start, every 2 min, and 20 s
+                after a pane's foreground program changes
+  actions.lua   init.lua actions and keys
+  procargs.js   exact argv via sysctl(KERN_PROCARGS2), through osascript's JavaScript bridge
+```
+
+**Classifying a pane.** For each tiled pane, the terminal block's `process` method gives the
+foreground PID. Its exact argv comes from `procargs.js` (Rex's Lua has no FFI, and `ps` joins
+arguments with spaces, so a quoted prompt would turn into flag values). Claude Code's session ID
+comes from `~/.claude/sessions/<pid>.json`; its launch flags are its argv without the prompt and
+the conversation selector, or `CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS` when Claude Code set it on
+`/restart` (that variable is the only part of a process environment ever read). Amp's thread ID
+is the `threads/T-….log` file it holds open (`lsof`).
+
+**Surviving restarts.** `~/.local/state/rex-agents/panes.json` maps block ID → command. Each
+entry records the server it was seen alive on (`PID@start time`). A save:
+
+- skips writing when no session is visible yet (server still starting);
+- drops an entry only if its pane is an idle shell *and* it ran under the current server (you
+  exited it yourself). After a restart the old entries stay until you revive them;
+- keeps entries whose block is missing for a week;
+- copies the previous file to `panes.prev.json` first, and writes atomically.
+
+The LaunchAgent keeps the watcher alive (`KeepAlive`). When the server restarts the watcher's
+connection drops, it exits and launchd starts it again.
+
+## Templates
+
+`~/.config/rex/templates/NAME.json`, meant to be edited by hand:
+
+```json
+{
+  "name": "My Project",
+  "saved_at": "2026-01-01 12:00",
+  "windows": [
+    {
+      "label": "Agents",
+      "layout": {
+        "split": {
+          "direction": "horizontal",
+          "ratio": 0.5,
+          "before": { "block": { "label": "manager", "cwd": "~/src/app", "cmd": "claude",
+                                 "resume": "claude --resume 0f…" } },
+          "after":  { "block": { "label": "server", "cwd": "~/src/app", "cmd": "mix phx.server",
+                                 "hold": true } }
+        }
+      }
+    }
+  ]
+}
+```
+
+- `cmd` starts the pane fresh; `resume` (written by park) continues the same conversation.
+- `hold: true` types the command without pressing enter.
+- Saving again keeps a hand-written `cmd`/`hold` of a labelled pane whose program it can't
+  recognise.
+
+## Settings
+
+`~/.config/rex/rex-agents.local.lua` returns a table (see `examples/rex-agents.local.lua`):
+extra `viewers`, `labelled` panes (`label` + `cwd_suffix` → `cmd`), service panes (`services.labels`
+and the init.lua `services.action` to run), and `keep_missing`.
+
+Environment overrides, mainly for tests: `REX_AGENTS_STATE`, `REX_AGENTS_TEMPLATES`,
+`REX_AGENTS_CLAUDE_SESSIONS`, `REX_AGENTS_CONFIG`, `REX_AGENTS_SERVER`.
+
+## Safety notes
+
+- Up to Rex CLI 0.1.0-preview.18, when `REX_SERVER` names a server that isn't answering, the
+  `rex` CLI quietly falls back to your home server (fixed in preview.19). `bin/rex-agents`
+  therefore always passes `-S` (the pane's own `REX_SERVER`, or `REX_AGENTS_SERVER`), and
+  `tests/e2e.sh` does the same.
+- Nothing here stops or restarts a Rex server.
+
+## Tests
+
+```sh
+rex do tests/unit.lua   # pure helpers (argv filtering, quoting, JSON, layouts)
+tests/e2e.sh            # full cycle on a private throwaway server with fake claude/amp binaries
+```
+
+`e2e.sh` starts its own `rex server run` on a private socket, saves, restarts that server with
+SIGTERM to its own PID, revives, parks and reopens a session, and checks every pane's argv.
+
+## Limits
+
+- macOS only (`osascript`, `lsof`, the `~/Library` paths).
+- Floating panes aren't recorded.
+- Revive retypes commands; it can't restore a program's in-memory state.
