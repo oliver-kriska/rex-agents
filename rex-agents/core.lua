@@ -411,7 +411,7 @@ end
 
 -- Every session's tiled panes. Reads all foreground programs' argv in one go.
 function M.snapshot()
-  local out, pids = {}, {}
+  local out = {}
   for _, s in ipairs(M.sessions()) do
     local v = M.view(s.session_id)
     if v then out[#out + 1] = v end
@@ -1636,11 +1636,11 @@ function M.template_save(sid, name, window_id, v)
   -- runs with, then the one the last save chose, else a new one
   local snap = M.load_snap().panes
   local taken = M.live_hub_names(snap)
-  local function hub_for(node, e, old)
+  local function hub_for(node, e, previous)
     if not M.config.hub then return nil end
-    if old and old.hub_name then return old.hub_name end
-    local env = node.pid and M.proc_env(node.pid, "HUB_NAME")
-    if M.hub_valid(env) then return env end
+    if previous and previous.hub_name then return previous.hub_name end
+    local name_from_env = node.pid and M.proc_env(node.pid, "HUB_NAME")
+    if M.hub_valid(name_from_env) then return name_from_env end
     local s = snap[node.block_id]
     if s and M.hub_valid(s.hub_name) then return s.hub_name end
     local n = M.hub_pick({ kind = e.kind, label = node.label, session = v.label, _name = e._name,

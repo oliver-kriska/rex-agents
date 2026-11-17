@@ -24,6 +24,6 @@ REX_AGENTS_ARGV=$(printf '%s\037' "$@")
 REX_AGENTS_REX=$rex
 export REX_AGENTS_ARGV REX_AGENTS_SERVER REX_AGENTS_REX
 if [ -n "$REX_AGENTS_SERVER" ]; then
-  exec "$rex" --autostart=false -S "$REX_AGENTS_SERVER" do "$dir/cli.lua"
+  exec "$rex" --autostart=false -S "$REX_AGENTS_SERVER" 'do' "$dir/cli.lua"
 fi
-exec "$rex" --autostart=false do "$dir/cli.lua"
+exec "$rex" --autostart=false 'do' "$dir/cli.lua"

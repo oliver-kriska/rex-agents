@@ -4,6 +4,9 @@ return {
   -- Optional agent names for a message hub (off by default).
   -- hub = true,
 
+  -- Additional shell names (extends zsh, -zsh, bash, -bash, sh, fish, login).
+  -- shells = { "my-shell" },
+
   -- Programs restarted with the same arguments after a server restart (empty by default).
   viewers = {
     -- "glow", "btop", "htop", "lazygit", "ngrok",

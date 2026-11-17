@@ -12,9 +12,9 @@
 --   rex-agents template-list
 --   rex-agents tab-to-session SESSION_ID WINDOW_ID NAME
 --                                     copy a tab into a new session NAME, resume commands typed but not run;
---                                     close the old tab, then: rex-agents start-pending NAME
+--                                     close the old tab yourself, then: rex-agents start-pending NAME
 --   rex-agents start-pending NAME
---   rex-agents status [--json]        each agent pane's hub name and whether its program already has it
+--   rex-agents status [--json]        all recognised panes; hub names only when enabled
 --   rex-agents verify [--against FILE]
 --                                     check panes.json and the watcher; with FILE (a copy of panes.json
 --                                     taken before a change), list missing entries and changed commands
@@ -26,6 +26,7 @@ local A = require("rex-agents.core")
 local USAGE = [[
 rex-agents: remember what runs in each Rex pane and bring it back.
 
+  rex-agents setup [--dry-run] [--uninstall] [--force] [--server ENDPOINT]
   rex-agents save
   rex-agents revive [--pick|--dry-run] [--save-first] [--pause]
   rex-agents template-save SESSION_ID [NAME] [--window WINDOW_ID]
@@ -39,7 +40,8 @@ rex-agents: remember what runs in each Rex pane and bring it back.
 
 Rex restores sessions, tabs, splits, pane labels and cwd itself, under the same block IDs,
 but no programs. Only known programs are recorded: Claude Code (resumed by session ID, with
-the flags it was started with), Amp (resumed by thread), and a few viewers.]]
+the flags it was started with), Amp (resumed by thread), and configured viewers/labelled/services.
+The watcher never types. Explicit revive (without --pick) starts all eligible commands.]]
 
 local function args()
   local raw = os.getenv("REX_AGENTS_ARGV")

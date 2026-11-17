@@ -115,7 +115,7 @@ local htpl = { split = { direction = "horizontal", ratio = 0.5,
 local hl = A.rex_layout(htpl, false)
 check("layout hub resume", hl.split.before.block.options.initial_input, "HUB_NAME=mgr claude --resume X\r")
 check("layout hub slugged + hold", hl.split.after.block.options.initial_input, "HUB_NAME=bad-name amp")
-check("layout hub renamed", A.rex_layout(htpl, true, function(n) return "p-" .. n end).split.before.block.options.initial_input,
+check("layout hub renamed", A.rex_layout(htpl, true, function(name) return "p-" .. name end).split.before.block.options.initial_input,
   "HUB_NAME=p-mgr claude\r")
 A.config.hub = configured_hub
 

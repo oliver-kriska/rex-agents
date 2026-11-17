@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # End-to-end test on a THROWAWAY Rex server. Never touches your own server:
 #   - starts its own `rex server run` on a private socket, with its own state dir and config
 #   - pins every rex call with -S (REX_SERVER alone falls back to the home server when the
@@ -123,7 +123,7 @@ assert(rex.call("session.create", { label = "Hub Names", initial_windows = {
     h(b("named", W .. "/plain", "FAKE_NAME='worker demo 2' claude"), b("shell", W .. "/plain", "FAKE_NAME=auto-x FAKE_NAME_SOURCE=derived claude")),
     h(b("mgr", W .. "/plain", "claude"), b("envd", W .. "/plain", "HUB_NAME=from-env claude"))) } } }))
 EOF
-rx do "$T/fixture.lua" >/dev/null
+rx 'do' "$T/fixture.lua" >/dev/null
 wait_for Proj mgr "^session "
 wait_for Proj amp "^thread "
 wait_for "Park Me" busy "^session "
@@ -175,12 +175,15 @@ rm -f "$T/ready"
 start_server
 
 # ---- the watcher's notice after the restart: one per server instance, none with notify = false
-printf '#!/bin/sh\nprintf "%%s|%%s\\n" "$1" "$2" >>"%s/notified.txt"\n' "$T" >"$T/notify.sh"
+cat >"$T/notify.sh" <<EOF
+#!/bin/sh
+printf '%s|%s\n' "\$1" "\$2" >>"$T/notified.txt"
+EOF
 chmod +x "$T/notify.sh"
 : >"$T/notified.txt"
 sed 's/^return {/return { notify = false,/' "$T/local.lua" >"$T/quiet.lua"
 watch_once() { # watch_once CONFIG: run the watcher until it has decided on the notice, then stop it
-  REX_AGENTS_CONFIG="$1" REX_AGENTS_NOTIFY_CMD="$T/notify.sh" "$REX" --autostart=false -S "$URL" do "$ROOT/rex-agents/watch.lua" --all interval=3600 soon=3600 >"$T/watch.log" 2>&1 &
+  REX_AGENTS_CONFIG="$1" REX_AGENTS_NOTIFY_CMD="$T/notify.sh" "$REX" --autostart=false -S "$URL" 'do' "$ROOT/rex-agents/watch.lua" --all interval=3600 soon=3600 >"$T/watch.log" 2>&1 &
   W=$!
   i=0; until grep -q "restart notice: " "$T/watch.log"; do
     i=$((i + 1)); [ $i -lt 100 ] || { cat "$T/watch.log"; fail "watcher did not save"; }; sleep 0.2
@@ -312,7 +315,7 @@ assert(rex.call("session.create", { label = "Relaunch", initial_windows = {
   { window_label = "R", layout = { block = { flavor = "com.superlogical.terminal.shell", label = "re",
     options = { cwd = "$T/w/plain", initial_input = "FAKE_RELAUNCH=1 CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS= claude --model opus --allowed-tools a --allowed-tools a\\r" } } } } } }))
 EOF
-rx do "$T/relaunch.lua" >/dev/null
+rx 'do' "$T/relaunch.lua" >/dev/null
 wait_for Relaunch re "^session "
 SID=$(pane Relaunch re | sed -n 's/^session //p' | head -1)
 "$RA" save >/dev/null
@@ -326,7 +329,7 @@ assert(rex.call("session.create", { label = "Broken", initial_windows = {
   { window_label = "B", layout = { block = { flavor = "com.superlogical.terminal.shell", label = "brk",
     options = { cwd = "$T/w/plain", initial_input = "FAKE_BROKEN=1 claude --model opus\\r" } } } } } }))
 EOF
-rx do "$T/broken.lua" >/dev/null
+rx 'do' "$T/broken.lua" >/dev/null
 wait_for Broken brk "^session "
 "$RA" save >/dev/null
 jq -e '[.panes[] | select(.session == "Broken")][0].revive | index("--resume") != null' "$P" >/dev/null || fail "sessions file with a stray } must still give the session id"
@@ -388,7 +391,7 @@ package.path = "$ROOT/?.lua;" .. package.path
 local A = require("rex-agents.core")
 for _, t in ipairs(A.revive_plan().todo) do assert(not t.labelled, "duplicate offered to picker") end
 EOF
-rx do "$T/plan.lua" >/dev/null
+rx 'do' "$T/plan.lua" >/dev/null
 ok "wrong-pane hub: reported by status/verify, excluded from revive picker, not saved there"
 
 # A process outside Rex still blocks a launch; a near-match argv must not block one.
@@ -529,7 +532,7 @@ local A = require("rex-agents.core")
 assert(not A.labelled_running("socket_hub"), "stale socket marked running")
 assert(A.wait_ready("socket_hub"):find("timed out"), "stale socket marked ready")
 EOF
-REX_AGENTS_CONFIG="$T/socket-path.lua" rx do "$T/stale.lua" >/dev/null
+REX_AGENTS_CONFIG="$T/socket-path.lua" rx 'do' "$T/stale.lua" >/dev/null
 jq '.name = "SocketRestart"' "$T/templates/socket-hub.json" >"$T/templates/socket-restart.json"
 # Fresh locks refuse a launch; abandoned ones recover without manual intervention.
 mkdir "$T/agents/labelled-start.lock"
@@ -573,6 +576,6 @@ REX_AGENTS_CONFIG="$T/plain.lua" "$RA" template-save "$PLAIN" plain >/dev/null
 if grep -q hub_name "$T/templates/plain.json"; then fail "hub metadata saved without opt-in"; fi
 ok "hub opt-out: commands, status, verify, revive, templates and names.json"
 
-"$REX" --autostart=false -S "$URL" do "$ROOT/tests/unit.lua" >"$T/unit.txt" || { cat "$T/unit.txt"; fail "unit tests"; }
+"$REX" --autostart=false -S "$URL" 'do' "$ROOT/tests/unit.lua" >"$T/unit.txt" || { cat "$T/unit.txt"; fail "unit tests"; }
 tail -1 "$T/unit.txt"
 echo "all e2e checks passed"
