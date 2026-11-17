@@ -68,6 +68,8 @@ end }
 EOF
 cat > "$T/local.lua" <<EOF
 return {
+  hub = true,
+  viewers = { "btop" },
   labelled = { hub = { cwd_suffix = "/hub-live", cmd = { "$T/bin/hub-server", "start", "two words", "$T/ready" },
     ready = { path = "$T/ready", timeout = 5 } } },
   services = { labels = { iex = "iex -S mix phx.server" }, action = "e2e_services" },
@@ -118,7 +120,7 @@ assert(rex.call("session.create", { label = "Park Me", initial_windows = {
   { window_label = "Work", layout = h(b("busy", W .. "/plain", "FAKE_STATUS=busy claude --model opus"), b("thread", W .. "/plain", "amp")) } } }))
 assert(rex.call("session.create", { label = "Hub Names", initial_windows = {
   { window_label = "Names", layout = h(
-    h(b("named", W .. "/plain", "FAKE_NAME='worker chief 2' claude"), b("shell", W .. "/plain", "FAKE_NAME=auto-x FAKE_NAME_SOURCE=derived claude")),
+    h(b("named", W .. "/plain", "FAKE_NAME='worker demo 2' claude"), b("shell", W .. "/plain", "FAKE_NAME=auto-x FAKE_NAME_SOURCE=derived claude")),
     h(b("mgr", W .. "/plain", "claude"), b("envd", W .. "/plain", "HUB_NAME=from-env claude"))) } } }))
 EOF
 rx do "$T/fixture.lua" >/dev/null
@@ -140,7 +142,7 @@ ok "save: 12 panes, exact argv, hint flags, runner, skips"
 # ---- hub names, chosen on the first save
 hub() { jq -r --arg s "$1" --arg l "$2" '[.panes[] | select(.session == $s and .label == $l)][0].hub_name' "$P"; }
 expect_hub() { got=$(hub "$1" "$2"); echo "$got" | grep -Eq "^$3\$" || fail "hub name of $1/$2: got $got, want $3"; }
-expect_hub "Hub Names" named "worker-chief-2"           # 1: Claude session name you set
+expect_hub "Hub Names" named "worker-demo-2"            # 1: Claude session name you set
 expect_hub "Hub Names" shell "hub-names-claude-[0-9a-z]{6}" # 3: derived name, generic label
 expect_hub "Hub Names" mgr "mgr"                         # 2: label (sessions are named in order)
 expect_hub Proj mgr "proj-mgr"                           #    taken → session name in front
@@ -235,7 +237,7 @@ pane Proj plain | grep -q FAKE && fail "plain shell must stay empty"
 wait_for Proj mgr "^hub=proj-mgr$"
 wait_for Proj amp "^hub=proj-amp-"
 wait_for Proj runner "^hub=runner$"
-wait_for "Hub Names" named "^hub=worker-chief-2$"
+wait_for "Hub Names" named "^hub=worker-demo-2$"
 wait_for "Hub Names" envd "^hub=from-env$"
 wait_for "Hub Names" shell "^hub=hub-names-claude-"
 "$RA" revive --dry-run | grep -q "^services:" || true
@@ -296,7 +298,7 @@ HUBS=$(rx ls --json | jq -r '.sessions[] | select(.label == "Hub Names") | .sess
 "$RA" template-save "$HUBS" >/dev/null
 jq '.name = "Hub Copy"' "$T/templates/hub-names.json" >"$T/h.json" && mv "$T/h.json" "$T/templates/hub-names.json"
 "$RA" template-open hub-names --fresh >/dev/null
-wait_for "Hub Copy" named "^hub=hub-copy-worker-chief-2$"
+wait_for "Hub Copy" named "^hub=hub-copy-worker-demo-2$"
 wait_for "Hub Copy" mgr "^hub=hub-copy-mgr$"
 "$RA" save >/dev/null
 # unique among live panes (the parked session's old blocks keep their names for a week; seen is older)
@@ -550,6 +552,26 @@ REX_AGENTS_CONFIG="$T/unconfirmed.lua" "$RA" template-open unconfirmed >"$T/sock
 grep -q 'launch not confirmed within 10s' "$T/socket.txt" || { cat "$T/socket.txt"; fail "unconfirmed launch warning"; }
 [ ! -d "$T/agents/labelled-start.lock" ] || fail "unconfirmed launch leaked lock"
 ok "unconfirmed wrapper launch warns and releases lock"
+
+# Default config must ignore even previously saved hub names and template metadata.
+echo 'return {}' >"$T/plain.lua"
+REX_AGENTS_CONFIG="$T/plain.lua" "$RA" status >"$T/plain-status.txt"
+if grep -Eq 'HUB NAME|HUB_NAME|restart pending|runs as' "$T/plain-status.txt"; then fail "hub leaked into default status"; fi
+REX_AGENTS_CONFIG="$T/plain.lua" "$RA" status --json | jq -e '[.panes[] | has("hub_name") or has("env_hub")] | all(. == false)' >/dev/null || fail "hub leaked into default JSON"
+REX_AGENTS_CONFIG="$T/plain.lua" "$RA" verify >"$T/plain-verify.txt" 2>&1 || true
+if grep -qi 'hub name' "$T/plain-verify.txt"; then fail "hub validation without opt-in"; fi
+REX_AGENTS_CONFIG="$T/plain.lua" "$RA" revive --dry-run >"$T/plain-plan.txt"
+if grep -q HUB_NAME "$T/plain-plan.txt"; then fail "hub prefix in default revive"; fi
+jq -n --arg cwd "$T/w/plain" '{name:"Plain",windows:[{layout:{block:{label:"agent",cwd:$cwd,cmd:"claude",hub_name:"ignored-name"}}}]}' >"$T/templates/plain.json"
+REX_AGENTS_CONFIG="$T/plain.lua" "$RA" template-open plain >/dev/null
+wait_for Plain agent '^hub=-$'
+REX_AGENTS_CONFIG="$T/plain.lua" "$RA" save >/dev/null
+[ ! -e "$N" ] || fail "opting out must remove names.json"
+jq -e '[.panes[] | has("hub_name")] | all(. == false)' "$P" >/dev/null || fail "hub names saved without opt-in"
+PLAIN=$(rx ls --json | jq -r '.sessions[] | select(.label == "Plain") | .session_id')
+REX_AGENTS_CONFIG="$T/plain.lua" "$RA" template-save "$PLAIN" plain >/dev/null
+if grep -q hub_name "$T/templates/plain.json"; then fail "hub metadata saved without opt-in"; fi
+ok "hub opt-out: commands, status, verify, revive, templates and names.json"
 
 "$REX" --autostart=false -S "$URL" do "$ROOT/tests/unit.lua" >"$T/unit.txt" || { cat "$T/unit.txt"; fail "unit tests"; }
 tail -1 "$T/unit.txt"

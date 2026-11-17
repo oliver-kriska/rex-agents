@@ -1,9 +1,13 @@
 -- ~/.config/rex/rex-agents.local.lua: rex-agents settings for this machine.
 -- Every key is optional; lists add to the defaults.
 return {
-  -- Programs restarted with the same arguments after a server restart
-  -- (defaults: glow, btop, htop, lazygit).
-  viewers = { "ngrok" },
+  -- Optional agent names for a message hub (off by default).
+  -- hub = true,
+
+  -- Programs restarted with the same arguments after a server restart (empty by default).
+  viewers = {
+    -- "glow", "btop", "htop", "lazygit", "ngrok",
+  },
 
   -- Panes recognised by their label and the end of their working directory, restarted with a
   -- fixed command whatever was running in them. Existing matching processes anywhere on the

@@ -249,11 +249,15 @@ local function cmd_status(a)
     return
   end
   local function cut(s, n) s = tostring(s or ""); return #s > n and (s:sub(1, n - 1) .. "…") or s end
-  local fmt = "%-18s %-14s %-12s %-10s %-28s %s"
-  print(string.format(fmt, "SESSION", "TAB", "PANE", "KIND", "HUB NAME", "STATE"))
+  local fmt = "%-18s %-14s %-12s %-10s " .. (A.config.hub and "%-28s " or "") .. "%s"
+  local function row(session, window, label, kind, hub, state)
+    if A.config.hub then print(string.format(fmt, session, window, label, kind, hub, state))
+    else print(string.format(fmt, session, window, label, kind, state)) end
+  end
+  row("SESSION", "TAB", "PANE", "KIND", "HUB NAME", "STATE")
   local pending, idle = 0, 0
   for _, r in ipairs(st.rows) do
-    print(string.format(fmt, cut(r.session, 18), cut(r.window, 14), cut(r.label, 12), r.kind, r.hub_name or "-", r.state))
+    row(cut(r.session, 18), cut(r.window, 14), cut(r.label, 12), r.kind, r.hub_name or "-", r.state)
     if r.state == "restart pending" then pending = pending + 1 end
     if r.state == "not running" then idle = idle + 1 end
   end

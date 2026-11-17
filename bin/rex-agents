@@ -8,6 +8,11 @@ while [ -L "$self" ]; do
 done
 dir=${REX_AGENTS_DIR:-$(cd "$(dirname "$self")/../rex-agents" && pwd)}
 
+if [ "${1:-}" = setup ]; then
+  shift
+  exec /bin/sh "$dir/../setup.sh" "$@"
+fi
+
 rex=${REX_AGENTS_REX:-$(command -v rex 2>/dev/null)}
 [ -n "$rex" ] || rex="$HOME/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex"
 

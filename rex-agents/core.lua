@@ -37,8 +37,9 @@ M.PATH = table.concat({ HOME .. "/.local/bin", HOME .. "/.amp/bin", HOME .. "/bi
 -- Defaults; ~/.config/rex/rex-agents.local.lua (a Lua file returning a table) adds to them.
 M.config = {
   shells = { "zsh", "-zsh", "bash", "-bash", "sh", "fish", "login" },
+  hub = false,
   -- programs restarted with the same arguments
-  viewers = { "glow", "btop", "htop", "lazygit" },
+  viewers = {},
   -- panes known by label + cwd suffix, restarted with a fixed command:
   --   labelled = { hub = { cwd_suffix = "/app", cmd = { "mix", "run", "--no-halt" } } }
   labelled = {},
@@ -74,6 +75,7 @@ local function load_local_config()
   end
   if extra.keep_missing then M.config.keep_missing = extra.keep_missing end
   if extra.notify ~= nil then M.config.notify = extra.notify end
+  M.config.hub = extra.hub == true
 end
 load_local_config()
 
@@ -454,7 +456,8 @@ end
 -- HUB_NAME; the rest of a process's environment is never read or stored.
 local HERE = (debug.getinfo(1, "S").source:match("^@?(.*)/[^/]+$")) or "."
 local PROCARGS = HERE .. "/procargs.js"
-local ENV_WANTED = { "CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS", "HUB_NAME" }
+local ENV_WANTED = { "CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS" }
+if M.config.hub then ENV_WANTED[#ENV_WANTED + 1] = "HUB_NAME" end
 local proc_cache = {}
 
 function M.prefetch(pids, keep)
@@ -868,7 +871,7 @@ function M.classify(leaf)
   local e
   if prog == "claude" then e = claude_entry(pid, argv) elseif prog == "amp" then e = amp_entry(pid, argv) end
   if e then
-    e._env_hub = M.proc_env(pid, "HUB_NAME") -- set when rex-agents started it
+    if M.config.hub then e._env_hub = M.proc_env(pid, "HUB_NAME") end
     e._pids = { tonumber(pid), e._child } -- the agent's processes, for names.json
     e._child = nil
     return e
@@ -882,11 +885,11 @@ end
 
 -- ---- hub names -------------------------------------------------------------------------------
 --
--- Every Claude Code / Amp pane rex-agents starts gets HUB_NAME=<name> in front of its command, a
+-- With hub enabled, every Claude Code / Amp pane gets HUB_NAME=<name> in front of its command, a
 -- name the pane keeps across restarts and revives (it owns an inbox on the hub). It is chosen once
 -- and stored as hub_name in panes.json and in templates:
 --   0. HUB_NAME the running program already has (only if no other pane has the same one)
---   1. the Claude Code session name, if you set it yourself (/rename): "worker chief 2" → worker-chief-2
+--   1. the Claude Code session name, if you set it yourself (/rename): "worker demo 2" → worker-demo-2
 --   2. the pane label, unless it is a generic one like "shell"
 --   3. <session>-<kind>-<last 6 characters of the block ID>
 -- Names must be unique among live panes; a taken one is tried again with the session name in front.
@@ -935,6 +938,10 @@ end
 -- Give every live agent entry in PANES a hub_name (see the rules above) and drop the helper
 -- fields classify added. OLD is the previous save's panes; LIVE the block IDs on screen.
 local function assign_hub_names(panes, live, old)
+  if not M.config.hub then
+    for _, e in pairs(panes) do e.hub_name, e._name, e._name_source, e._env_hub = nil, nil, nil, nil end
+    return
+  end
   local agents = {}
   for bid in pairs(live) do
     local e = panes[bid]
@@ -998,7 +1005,7 @@ end
 
 -- "HUB_NAME=<name> " for an agent entry, else "".
 function M.hub_prefix(e)
-  if e and AGENT_KINDS[e.kind] and M.hub_valid(e.hub_name) then return "HUB_NAME=" .. e.hub_name .. " " end
+  if M.config.hub and e and AGENT_KINDS[e.kind] and M.hub_valid(e.hub_name) then return "HUB_NAME=" .. e.hub_name .. " " end
   return ""
 end
 
@@ -1018,6 +1025,7 @@ end
 
 -- Names held by live agent panes (from the last save).
 function M.live_hub_names(snap)
+  if not M.config.hub then return {} end
   snap = snap or M.load_snap().panes
   local live, taken = M.live_block_ids(), {}
   for bid, e in pairs(snap) do
@@ -1078,7 +1086,11 @@ function M.save()
   for _ in pairs(panes) do count = count + 1 end
   if read_file(M.paths.snap) then copy_file(M.paths.snap, M.paths.prev) end
   M.write_json(M.paths.snap, { server = server or old.server, saved_at = now, panes = panes }, "600")
-  M.write_json(M.paths.names, M.names_doc(panes, pids, server, now), "600")
+  if M.config.hub then
+    M.write_json(M.paths.names, M.names_doc(panes, pids, server, now), "600")
+  else
+    os.remove(M.paths.names) -- opting out must also revoke an earlier published map
+  end
   return { panes = count }
 end
 
@@ -1116,7 +1128,8 @@ function M.status()
         local classified = M.classify(leaf)
         local e = classified or saved
         if e then
-          local hub, env_hub = saved and saved.hub_name, classified and classified._env_hub
+          local hub, env_hub
+          if M.config.hub then hub, env_hub = saved and saved.hub_name, classified and classified._env_hub end
           local pane = M.pane_state(v.session_id, bid)
           local reason
           if e.kind == "services" and not M.config.services.action then reason = "no services action configured"
@@ -1129,7 +1142,7 @@ function M.status()
           elseif pane == "idle" then state = "not running"
           elseif pane ~= "busy" then state = "pane is " .. pane
           elseif not classified then state = "busy (different program)"
-          elseif not AGENT_KINDS[e.kind] then state = "running"
+          elseif not AGENT_KINDS[e.kind] or not M.config.hub then state = "running"
           elseif not hub then state = "not saved yet"
           elseif env_hub == hub then state = "ok"
           elseif env_hub then state = "runs as " .. env_hub
@@ -1143,7 +1156,7 @@ function M.status()
   for bid, e in pairs(snap.panes) do
     if not seen[bid] then
       rows[#rows + 1] = { session = e.session, session_id = e.session_id, window = e.window,
-        label = e.label, block_id = bid, kind = e.kind, hub_name = e.hub_name,
+        label = e.label, block_id = bid, kind = e.kind, hub_name = M.config.hub and e.hub_name or nil,
         state = "pane missing", reason = e.note or "pane missing" }
     end
   end
@@ -1190,17 +1203,17 @@ function M.verify(against)
       elseif live[bid] then warn("open pane's agent can't be resumed (%s): %s", e.note, where(bid, e))
       else no_cmd = no_cmd + 1 end
     end
-    if AGENT_KINDS[e.kind] then
+    if AGENT_KINDS[e.kind] and live[bid] then agents = agents + 1 end
+    if M.config.hub and AGENT_KINDS[e.kind] then
       if e.hub_name ~= nil and not M.hub_valid(e.hub_name) then err("invalid hub name %q: %s", tostring(e.hub_name), where(bid, e)) end
       if live[bid] then
-        agents = agents + 1
         if not e.hub_name then err("live agent without a hub name: %s", where(bid, e)) end
         if e.hub_name then
           holders[e.hub_name] = holders[e.hub_name] or {}
           table.insert(holders[e.hub_name], where(bid, e))
         end
       end
-    elseif e.hub_name ~= nil then
+    elseif M.config.hub and e.hub_name ~= nil then
       err("hub name on a %s pane: %s", tostring(e.kind), where(bid, e))
     end
   end
@@ -1560,7 +1573,7 @@ local function tpl_node(node, old_blocks, hub_for)
     if old and not b.cmd and old.cmd then -- keep hand-written commands of labelled panes
       b.cmd = old.cmd
       if old.hold then b.hold = true end
-      b.hub_name = old.hub_name
+      if M.config.hub then b.hub_name = old.hub_name end
     end
     if node.label and node.label ~= "shell" then b.label = node.label end
     return { block = b }
@@ -1624,6 +1637,7 @@ function M.template_save(sid, name, window_id, v)
   local snap = M.load_snap().panes
   local taken = M.live_hub_names(snap)
   local function hub_for(node, e, old)
+    if not M.config.hub then return nil end
     if old and old.hub_name then return old.hub_name end
     local env = node.pid and M.proc_env(node.pid, "HUB_NAME")
     if M.hub_valid(env) then return env end
@@ -1655,7 +1669,7 @@ local function rex_layout(node, fresh, hub, launches)
     local cmd
     if fresh then cmd = b.cmd else cmd = b.resume or b.cmd end
     local labelled = cmd and M.labelled_command(cmd)
-    if cmd and b.hub_name then
+    if M.config.hub and cmd and b.hub_name then
       local n = hub and hub(b.hub_name) or b.hub_name
       if not M.hub_valid(n) then n = M.hub_slug(n) end
       if n ~= "" then cmd = "HUB_NAME=" .. n .. " " .. cmd end

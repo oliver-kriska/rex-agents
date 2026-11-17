@@ -45,12 +45,12 @@ check("split 3", A.split("x  y"), { "x", "y" })
 check("split/join roundtrip", A.split(A.join({ "a b", "it's", "", "x" })), { "a b", "it's", "", "x" })
 
 for _, c in ipairs({ { "My Project", "my-project" }, { "Shop - main", "shop-main" }, { "  ", "session" },
-  { "knowledge_university", "knowledge-university" }, { "Čaj Ok", "aj-ok" } }) do
+  { "sample_library", "sample-library" }, { "Čaj Ok", "aj-ok" } }) do
   check("slug " .. c[1], A.slug(c[1]), c[2])
 end
 
 check("window label default", A.is_default_window_label("Window 0a1b2c3d"), true)
-check("window label custom", A.is_default_window_label("PR Marmot"), false)
+check("window label custom", A.is_default_window_label("Review Board"), false)
 check("window label upper hex", A.is_default_window_label("Window 0A1B2C3D"), false)
 
 for _, r in ipairs({ 0.19999999999999996, 0.30000000000000004, 0.5, 0.75, 0.43000000000000005, 0.3 }) do
@@ -79,24 +79,29 @@ check("layout label", fresh.split.after.block.label, "hub")
 check("has_resume", A.template_has_resume({ windows = { { layout = tpl } } }), true)
 
 -- hub names
-check("hub valid", A.hub_valid("worker-chief-2"), true)
+local configured_hub = A.config.hub
+A.config.hub = false
+check("hub disabled prefix", A.hub_prefix({ kind = "claude", hub_name = "mgr" }), "")
+check("hub disabled template", A.rex_layout({ block = { cmd = "claude", hub_name = "mgr" } }, true).block.options.initial_input, "claude\r")
+A.config.hub = true
+check("hub valid", A.hub_valid("worker-demo-2"), true)
 check("hub valid upper/dot", A.hub_valid("A.b_c-1"), true)
 check("hub invalid start", A.hub_valid("-x"), false)
 check("hub invalid char", A.hub_valid("a b"), false)
 check("hub invalid long", A.hub_valid(string.rep("a", 65)), false)
-check("hub slug", A.hub_slug("Worker Chief 2"), "worker-chief-2")
-check("hub slug edges", A.hub_slug("  --PR Marmot: iOS!! "), "pr-marmot-ios")
+check("hub slug", A.hub_slug("Worker Demo 2"), "worker-demo-2")
+check("hub slug edges", A.hub_slug("  --Review Board: iOS!! "), "review-board-ios")
 check("hub slug long", #A.hub_slug(string.rep("ab ", 40)), 64)
 check("hub slug long, cut on a dash", #A.hub_slug(string.rep("abc ", 20)), 63)
-local BID = "block:01a1e364-cfef-7b46-80fa-e55309b92a10"
-check("hub rule 1 user name", A.hub_pick({ kind = "claude", session = "Chief", label = "shell",
-  _name = "chief manager", _name_source = "user" }, BID, {}), "chief-manager")
-check("hub rule 1 skips derived", A.hub_pick({ kind = "claude", session = "Chief", label = "shell",
-  _name = "rex-agents-e5", _name_source = "derived" }, BID, {}), "chief-claude-b92a10")
-check("hub rule 2 label", A.hub_pick({ kind = "amp", session = "PR Marmot", label = "PR Marmot iOS" }, BID, {}), "pr-marmot-ios")
-check("hub rule 3", A.hub_pick({ kind = "amp-runner", session = "Enaia - main", label = "shell" }, BID, {}), "enaia-main-amp-runner-b92a10")
-check("hub collision → session prefix", A.hub_pick({ kind = "claude", session = "Enaia - main", label = "server" }, BID,
-  { server = true }), "enaia-main-server")
+local BID = "block:00000000-0000-0000-0000-000000b92a10"
+check("hub rule 1 user name", A.hub_pick({ kind = "claude", session = "Demo", label = "shell",
+  _name = "demo manager", _name_source = "user" }, BID, {}), "demo-manager")
+check("hub rule 1 skips derived", A.hub_pick({ kind = "claude", session = "Demo", label = "shell",
+  _name = "rex-agents-e5", _name_source = "derived" }, BID, {}), "demo-claude-b92a10")
+check("hub rule 2 label", A.hub_pick({ kind = "amp", session = "Review Board", label = "Review Board iOS" }, BID, {}), "review-board-ios")
+check("hub rule 3", A.hub_pick({ kind = "amp-runner", session = "Shop - main", label = "shell" }, BID, {}), "shop-main-amp-runner-b92a10")
+check("hub collision → session prefix", A.hub_pick({ kind = "claude", session = "Shop - main", label = "server" }, BID,
+  { server = true }), "shop-main-server")
 check("hub collision, prefix taken too", A.hub_pick({ kind = "claude", session = "Proj", label = "mgr" }, BID,
   { mgr = true, ["proj-mgr"] = true }), "proj-claude-b92a10")
 check("hub rule 3 long session", #A.hub_pick({ kind = "claude", session = string.rep("x", 80) }, BID, {}) <= 64, true)
@@ -112,6 +117,7 @@ check("layout hub resume", hl.split.before.block.options.initial_input, "HUB_NAM
 check("layout hub slugged + hold", hl.split.after.block.options.initial_input, "HUB_NAME=bad-name amp")
 check("layout hub renamed", A.rex_layout(htpl, true, function(n) return "p-" .. n end).split.before.block.options.initial_input,
   "HUB_NAME=p-mgr claude\r")
+A.config.hub = configured_hub
 
 -- repeated flag groups from Claude Code relaunches are dropped, order kept
 check("dedupe flags", A.dedupe_flags({ "--model", "x", "--allowed-tools", "a", "--allowed-tools", "b",

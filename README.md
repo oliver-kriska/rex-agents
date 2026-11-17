@@ -1,294 +1,291 @@
 # rex-agents
 
-Bring your coding agents back after a [Rex](https://www.superlogical.com/rex/) server restart, and
-open whole projects (tabs, splits, agents) from hand-editable templates.
+Bring Claude Code and Amp conversations back after a [Rex](https://www.superlogical.com/rex/)
+server restart. Rex restores your tabs and splits; rex-agents remembers the programs in them.
+Press **⌘⇧B**, select the panes to resume, and continue where you left off.
 
-Rex restores sessions, tabs, splits, pane labels and working directories after a restart, under
-the same block IDs, but not the programs that ran in them. rex-agents remembers what ran in each
-pane and types it back:
-
-- **Claude Code**: `claude <the flags it was started with> --resume <session id>`
-- **Amp**: `amp threads continue <thread id>`; `--no-tui` runners with their own arguments
-- **viewers** you list (`btop`, `lazygit`, …) with their arguments
-- **labelled panes**: a pane known by its label and directory gets a fixed command
-- **service panes**: run one of your init.lua actions for the session
-
-It's written in Lua and runs inside Rex (`rex do` scripts and init.lua actions). It needs no
-Python, Node or other runtime: only what macOS ships (`ps`, `lsof`, `osascript`) plus `fzf` for
-the pickers.
+Runs as a small Lua extension inside Rex. No hub, Python or Node required.
+Viewers, labelled programs, service actions and project templates are optional.
 
 ## Install
 
+Requirements: **macOS**, **Rex 0.1.0-preview.18 or newer** (tested on preview.18 and preview.20),
+and **fzf** for interactive pickers. Claude Code and/or Amp must already be installed.
+Process inspection uses macOS `ps`, `lsof` and `osascript`; Unix socket probes use `/usr/bin/nc`.
+
+### Homebrew
+
+The formula lives in this repository, following the same tap layout as chief-of-staff.
+Until a tagged release is published, it is **HEAD-only**:
+
 ```sh
-git clone … ~/src/rex-agents && cd ~/src/rex-agents
-./install.sh            # or ./install.sh --dry-run
+brew tap oliver-kriska/rex-agents https://github.com/oliver-kriska/rex-agents
+brew install --HEAD rex-agents
 ```
 
-`install.sh` links `~/.config/rex/rex-agents` and `~/.config/rex/bin/rex-agents` to the
-checkout, copies `examples/rex-agents.local.lua` to `~/.config/rex/` if you have none (it never
-overwrites yours), and loads a LaunchAgent that runs the watcher. It copies `panes.json` to
-`panes.before-install-<time>.json` first, waits for the watcher's first save and runs
-`rex-agents verify --against` that copy. If saved panes exist but you had no settings, it stops
-before starting the watcher, so a save with the example settings can't drop the panes only your
-settings recognise (`--force` starts it anyway). Then add one line to `~/.config/rex/init.lua`:
+These commands become available once the repository and formula are published. From a **Rex
+pane**, run:
 
-```lua
-require("rex-agents.actions"){}
--- or choose keys:  require("rex-agents.actions"){ keys = { revive = "cmd+shift+b", open = "cmd+shift+t" } }
+```sh
+rex-agents setup --dry-run
+rex-agents setup
+rex --autostart=false -S "$REX_SERVER" config reload
 ```
 
-and run `rex config reload`.
+Outside a Rex pane, pass `rex-agents setup --server ENDPOINT`. Setup pins the watcher to that
+server; it never starts or restarts Rex and does not type into panes.
+
+### Git clone
+
+```sh
+git clone https://github.com/oliver-kriska/rex-agents.git
+cd rex-agents
+./install.sh --dry-run
+./install.sh
+```
+
+Run these inside a Rex pane too, or pass `--server ENDPOINT`. `install.sh` uses the same setup.
+Add `~/.config/rex/bin` to your PATH to use the CLI from other terminals.
+
+### What setup changes
+
+Setup prints its plan first, then:
+
+- links the Lua module and CLI into `~/.config/rex/`;
+- copies `examples/rex-agents.local.lua` only when settings are absent;
+- backs up `init.lua` and adds an idempotent, marked `require("rex-agents.actions"){ keys = … }`
+  block; an existing require line is kept, including custom keys;
+- backs up saved panes and its previous plist, then installs and loads
+  `~/Library/LaunchAgents/com.rex-agents.watch.plist`;
+- runs `verify`. On a fresh install, it may report that the first watcher save is still pending.
+
+Homebrew links point to the stable `opt/rex-agents/libexec` path, not a versioned Cellar path.
+They survive upgrades. The running watcher picks up new Lua code when it next starts; rerun
+setup after an upgrade to reload the watcher immediately (without restarting Rex).
+
+Setup refuses unrelated files/links and modified managed blocks before changing anything.
+To customize the inserted key bindings, remove its two marker comments first; the remaining
+require line is yours. If saved state exists without settings, restore your settings first;
+`--force` explicitly accepts the example settings instead. Settings and templates are never
+overwritten. The old install.sh watcher is recognised by its label and script path, backed up
+and upgraded. Before switching between clone and Homebrew installations, uninstall the old integration.
+
+```sh
+rex-agents setup --uninstall --dry-run
+rex-agents setup --uninstall
+```
+
+Uninstall removes only its unchanged init block, links and watcher. It keeps settings,
+templates, logs, backups and saved state. User-written require lines need manual removal.
+Run this **before** `brew uninstall rex-agents` or deleting the checkout, then reload Rex config.
 
 ## Use
 
-| Key / palette | What it does |
-| --- | --- |
-| ⌘⇧B · *Agents: Bring Back After Restart* | Lists the saved agents whose panes are idle shells now; enter types their commands back. |
-| ⌘⇧T · *Agents: Open Project Template* | Opens a template as a new session, with fresh agents or (for parked projects) the same conversations. |
-| *Agents: Save Session as Template* / *Save Tab as Template* | Writes `~/.config/rex/templates/NAME.json` from what runs now. |
-| *Agents: Park Session* | Saves the session as a template that continues its conversations, warns about Claude turns still running, then asks before closing it. |
+**⌘⇧B · Agents: Bring Back After Restart** lists saved panes whose foreground program is now
+an idle shell. Enter retypes the selected commands. Nothing resumes automatically.
 
-The same from a shell:
-
-```
+```sh
 rex-agents save
-rex-agents revive [--pick|--dry-run]
-rex-agents template-save SESSION_ID [NAME] [--window WINDOW_ID]
-rex-agents template-open [NAME|--pick] [--fresh]
-rex-agents park SESSION_ID [NAME]
-rex-agents template-list
-rex-agents tab-to-session SESSION_ID WINDOW_ID NAME   # then: rex-agents start-pending NAME
-rex-agents status [--json]
-rex-agents verify [--against FILE]
+rex-agents revive --dry-run
+rex-agents revive --pick
+rex-agents status
+rex-agents status --json
+rex-agents verify
+rex-agents verify --against /path/to/panes.before-install.json
 ```
 
-`status` lists agents, labelled programs, service panes and viewers, including saved panes that
-are missing or cannot be resumed. Agents also show their hub name (see below):
+Claude Code resumes with its launch flags and `--resume SESSION_ID`. Amp resumes with
+`amp threads continue THREAD_ID`; `--no-tui` runners keep their own arguments.
 
-| State | Meaning |
-| --- | --- |
-| `ok` | runs with `HUB_NAME` set to its name |
-| `restart pending` | runs without `HUB_NAME` (started by hand, or before names existed); gets it the next time rex-agents starts it |
-| `runs as NAME` | runs with another `HUB_NAME`, set by hand |
-| `not saved yet` | started since the last save (the watcher saves within 20 s) |
-| `not running` | an idle shell after a restart; ⌘⇧B brings it back |
-| `running` | a service or viewer is running |
-| `already running (pid N, in SESSION / PANE)` | the configured labelled command runs here or elsewhere; it will not be started again |
-| `busy (different program)` / `pane is busy` | the pane cannot safely receive a command |
-| `cannot resume: REASON` | no resume command, removed labelled config, or missing service action |
-| `pane missing` | the saved pane no longer exists |
+`status` covers agents and every configured pane kind, including missing panes and reasons a
+pane cannot resume. States include `running`, `not running`, `busy (different program)`,
+`cannot resume: REASON`, `pane missing`, and `already running (…)` for labelled programs.
+`verify` checks commands, helper fields, watcher health and save age. With `--against`, it also
+reports lost entries and changed commands. Closed panes and exited programs produce warnings;
+an unrecognised running program or invalid saved state produces an error (exit 1).
 
-`--json` gives the same rows with session and block IDs, reasons and warnings. Both `status` and
-`verify` warn about labelled programs running in the wrong pane, configured labels matching no
-pane, and saved labelled commands differing from current config. Reporting a program elsewhere
-does not save it under that other pane. `verify` checks `panes.json` (entries
-have a command, no duplicate names among live panes, no leftover helper fields), the watcher
-and the time of the last save, and exits 1 on a problem. With `--against`, a copy of
-`panes.json` taken before a change, it also lists entries that went missing and commands that
-changed; a pane you closed or a program you exited is only a warning, and a pane that became
-resumable is reported as such. A live agent that can't be resumed is a warning naming the pane.
+After a restart, one macOS notification says **“N panes can be brought back — press ⌘⇧B”**.
+`notify = false` in local settings disables it. The watcher remembers the notified server in
+`notified.json`, so restarting just the watcher does not repeat it. Panes still starting at the
+first save are not counted, and labelled programs already running elsewhere are excluded.
 
-Revive only types into a pane whose foreground program is a shell at its prompt.
-It checks each pane again right before typing (the picker may have been
-open a while), waits up to 10 s for a pane whose shell is still starting, and skips a pane that
-runs a shell inside another shell.
+## Optional features
 
-Labelled programs start first, then service actions, then agents and viewers. A labelled entry
-can set `ready = { path = "~/Library/Application Support/my-hub/hub.sock", timeout = 30 }`:
-rex-agents waits for that path (including sockets) before proceeding. A timeout warns and
-continues; an already-running program is treated as ready immediately.
+All settings live in `~/.config/rex/rex-agents.local.lua`, a Lua file returning a table.
+See [the commented example](examples/rex-agents.local.lua). Every key is optional.
 
-For wrappers that exec another runtime (for example a launcher that becomes `beam.smp`), set
-`running = { socket = "~/Library/Application Support/my-hub/hub.sock" }`. This overrides argv
-matching: the Unix stream socket must accept a connection, not merely exist. A stale socket
-file does not count as running. The probe uses macOS `/usr/bin/nc` with empty stdin and sends
-no payload; it checks reachability, not application health. Use a socket this user can access.
-Socket mode reports `already running (hub.sock answers)` without PID or pane attribution.
+### Viewers, labelled programs and service panes
 
-Set `ready = true` to wait for the running check (30 s), or use `ready = { path = "…",
-timeout = 30 }`. When that path is the configured running socket, readiness also requires a
-successful connection. Other readiness paths retain their existence check.
+All three lists are empty by default. For example:
 
-Without a `running` override, rex-agents checks machine-wide process argv for the
-configured command as a whole-argument prefix (extra trailing flags are allowed). Existing
-copies are omitted from the picker and reported with their PID and, when visible on this Rex
-server, session/pane. Revive uses the **current config command**, never a stale saved one.
-Template-open and start-pending apply the same guard when their complete command matches a
-labelled entry. Newly moved labelled commands stay unstaged until start-pending checks them.
-
-## How it works
-
-```
-rex-agents/
-  core.lua      everything: classify panes, save, revive, templates (works in init.lua and rex do)
-  cli.lua       the commands above, run by `rex do` (bin/rex-agents is a thin sh wrapper)
-  watch.lua     long-running `rex do --all` script: saves at start, every 2 min, and 20 s
-                after a pane's foreground program changes
-  actions.lua   init.lua actions and keys
-  procargs.js   exact argv via sysctl(KERN_PROCARGS2), through osascript's JavaScript bridge
+```lua
+return {
+  viewers = { "btop", "lazygit" },
+  labelled = {
+    api = { cwd_suffix = "/my-app", cmd = { "mix", "phx.server" } },
+    hub = { cwd_suffix = "/my-hub", cmd = { "/usr/local/bin/my-hub", "start" },
+      running = { socket = "~/Library/Application Support/my-hub/hub.sock" }, ready = true },
+  },
+  services = { labels = { server = "mix phx.server", tunnel = true }, action = "start_services" },
+}
 ```
 
-**Classifying a pane.** For each tiled pane, the terminal block's `process` method gives the
-foreground PID. Its exact argv comes from `procargs.js` (Rex's Lua has no FFI, and `ps` joins
-arguments with spaces, so a quoted prompt would turn into flag values). Claude Code's session ID
-comes from `~/.claude/sessions/<pid>.json`; its launch flags are its argv without the prompt and
-the conversation selector, or `CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS` when Claude Code set it
-(non-empty) on `/restart`. After `/restart` or an update Claude Code keeps the first process and
-runs the new version as its child; the session file then belongs to the child, so rex-agents looks
-there too. Flag groups repeated by such relaunches (`--allowed-tools X` again and again) are
-written once (that variable and `HUB_NAME` are the only parts of a process environment ever read). Amp's thread ID
-is the `threads/T-….log` file it holds open (`lsof`).
+Viewers resume with their arguments. Labelled panes match label + cwd suffix and use the
+**current configured command**, not a stale saved command. Service panes run the named
+init.lua action once per session with an idle service pane; a `true` command records the
+running program's arguments for templates. Service actions are user-owned code.
 
-**Surviving restarts.** `~/.local/state/rex-agents/panes.json` maps block ID → command. Each
-entry records the server it was seen alive on (Rex's `instance_id`; entries saved by earlier
-versions hold `PID@start time` and are still recognised). A save:
+Labelled programs start first, then services, then agents and viewers. Before starting a
+labelled command, rex-agents searches machine-wide process argv for a whole-argument prefix
+match. An existing copy is skipped, omitted from the picker and reported as
+`already running (pid N, in SESSION / PANE)` when its pane is known. Template-open and
+start-pending apply the same check when their complete command matches a labelled entry.
 
-- skips writing when no session is visible yet (server still starting), or when the server
-  stopped or restarted while it looked (dying programs would look like ones you exited);
-- drops an entry only if its pane is an idle shell *and* it ran under the current server (you
-  exited it yourself). After a restart the old entries stay until you revive them;
-- keeps entries whose block is missing for a week;
-- copies the previous file to `panes.prev.json` first, and writes atomically.
+Wrappers that exec a different runtime cannot be found by argv. Set `running.socket` to
+override that check: the Unix stream socket must **accept a connection**, not merely exist.
+No payload is sent. A stale socket is not running. This checks reachability, not application
+health, and reports `already running (hub.sock answers)` without a PID or pane attribution.
 
-The LaunchAgent keeps the watcher alive (`KeepAlive`). When the server restarts the watcher's
-connection drops, it exits and launchd starts it again.
+`ready = true` waits up to 30 seconds for the running check after launch. Alternatively,
+`ready = { path = "~/path/to/ready", timeout = 30 }` waits for path existence. If that path is
+the configured running socket, it must accept a connection. A timeout warns and continues;
+an already-running program is ready immediately.
 
-**Notice after a restart.** When the watcher's first save runs under a new server (Rex's
-`instance_id` differs from the one in the previous save), it works out what ⌘⇧B would bring back
-and, if anything, shows one macOS notification: *rex-agents: N panes can be brought back — press
-⌘⇧B*. It never types into a pane. The server it notified for is kept in `notified.json`, so a
-watcher that launchd restarts doesn't repeat it. `notify = false` in the settings turns it off. A
-pane whose shell is still starting during that save isn't counted. Service panes count too;
-labelled commands already running elsewhere do not.
+`status` and `verify` warn if a labelled program runs in the wrong pane, a configured label
+matches no pane, or a saved command differs from config. Finding it elsewhere does not save
+it under that other pane. Socket-only checks cannot attribute a process to a pane.
 
-## Agent names (`HUB_NAME`)
+### Hub names (opt-in)
 
-Every Claude Code and Amp pane rex-agents starts (revive, template-open, start-pending) gets
-`HUB_NAME=<name>` in front of its command, for tools that address agents by name (a message hub,
-an MCP server reading `HUB_NAME`). The name is chosen once per pane and then kept across server
-restarts, revives and park/reopen, in `hub_name` in `panes.json` and in templates:
+Add this one line inside the local settings table to enable agent names:
 
-1. the `HUB_NAME` the program already runs with;
-2. the Claude Code session name, if you set it (`/rename worker chief 2` → `worker-chief-2`);
-3. the pane label, unless it's a generic one such as `shell`;
-4. `<session>-<kind>-<last 6 characters of the block ID>`.
+```lua
+hub = true,
+```
 
-Names are unique among live panes: a taken one gets the session name in front.
-`rex-agents status` shows each pane's name and whether its program already has it. Names follow
-`[A-Za-z0-9][A-Za-z0-9._-]*`, at most 64 characters. A program that is already running keeps
-its environment; it gets the name the next time rex-agents starts it.
+When enabled, commands started by revive, template-open and start-pending receive
+`HUB_NAME=<name>`. Names persist in `panes.json` and templates and are unique among live panes.
+Priority: an existing `HUB_NAME`, a user-set Claude Code session name, a non-generic pane
+label, then `<session>-<kind>-<last 6 block ID characters>`. Collisions add the session name.
+Names use `[A-Za-z0-9][A-Za-z0-9._-]*` and have at most 64 characters.
 
-### `names.json`: names for programs already running
+Status then adds a hub column: `ok` means the environment matches, `restart pending` means
+the running agent has no `HUB_NAME`, and `runs as NAME` means it has a different one. Already
+running processes keep their environments. Hub names are validated only when enabled.
 
-A name reaches a program through `HUB_NAME` only when rex-agents starts it. For everything else,
-each save also writes `~/.local/state/rex-agents/names.json` (mode 600, atomic), a format kept
-stable for other tools:
+Every enabled save writes a private (mode 600), atomic `~/.local/state/rex-agents/names.json`:
 
 ```json
 {
   "version": 1,
-  "server": "<Rex server instance_id>",
+  "server": "<server instance_id>",
   "saved_at": 1794900000,
   "blocks": {
-    "block:01a1…": { "hub_name": "worker-chief", "kind": "claude", "session": "Chief",
-                     "session_id": "session:01a1…", "pids": [41049, 33200] }
+    "<block id>": { "hub_name": "worker-demo", "kind": "claude", "session": "Demo",
+                    "session_id": "<session id>", "pids": [10001, 10002] }
   }
 }
 ```
 
-Only agents running at the time of the save are listed, with unique names. `pids` are the agent's
-processes: the pane's foreground program and, after a Claude Code `/restart` or update, its
-relaunched child. A reader (for example a hub client with `HUB_NAME` unset) looks up `$REX_BLOCK`
-and should accept the name only if one of `pids` is its own ancestor (so a nested agent started
-inside that pane doesn't take it) and the file is recent (saves happen every 2 minutes).
-`HUB_NAME`, when set, always wins.
+Only running agents are listed. `pids` includes the pane's foreground process and the
+relaunched Claude Code child. Version 1 is unchanged for chief v0.1.0-pre.9 clients.
+Turning hub integration off removes this map on the next successful save and stops generated
+prefixes, hub metadata, columns and validation. Explicit commands and inherited environments
+remain user-controlled; rex-agents does not strip a manually supplied `HUB_NAME`.
 
-## Templates
+**chief client rules (v0.1.0-pre.9):** both `hub mcp` and CLI commands resolve names in order:
+`--as`, `HUB_NAME`, then `blocks[$REX_BLOCK]` in names.json. They refuse the file unless it is
+a plain user-owned file with no group/other mode bits, version 1, saved within 10 minutes and
+no more than 1 minute in the future. A listed PID must be a client ancestor; all intervening
+processes must be shells or launchers. Each refusal prints a one-line reason. This lookup
+reads only names.json plus one `ps`.
 
-`~/.config/rex/templates/NAME.json`, meant to be edited by hand:
+### Project templates and parking
+
+**⌘⇧T · Agents: Open Project Template** opens fresh agents or continues parked conversations.
+Palette actions save a session/tab as a template or park a session. Parking warns about busy
+Claude turns and asks before closing. Templates are hand-editable JSON under
+`~/.config/rex/templates/NAME.json`:
 
 ```json
 {
   "name": "My Project",
-  "saved_at": "2026-01-01 12:00",
-  "windows": [
-    {
-      "label": "Agents",
-      "layout": {
-        "split": {
-          "direction": "horizontal",
-          "ratio": 0.5,
-          "before": { "block": { "label": "manager", "cwd": "~/src/app", "cmd": "claude",
-                                 "resume": "claude --resume 0f…" } },
-          "after":  { "block": { "label": "server", "cwd": "~/src/app", "cmd": "mix phx.server",
-                                 "hold": true } }
-        }
-      }
+  "windows": [{ "label": "Agents", "layout": {
+    "split": { "direction": "horizontal", "ratio": 0.5,
+      "before": { "block": { "label": "manager", "cwd": "~/src/app", "cmd": "claude",
+                               "resume": "claude --resume <session-id>" } },
+      "after": { "block": { "label": "server", "cwd": "~/src/app", "cmd": "mix phx.server",
+                              "hold": true } }
     }
-  ]
+  } }]
 }
 ```
 
-- `cmd` starts the pane fresh; `resume` (written by park) continues the same conversation.
-- `hold: true` types the command without pressing enter.
-- `hub_name` (agents only) is the pane's `HUB_NAME`. A hand-written one is kept when you save the
-  template again (for labelled panes). If a live pane already uses it when the template opens, the
-  session name goes in front.
-- Saving again keeps a hand-written `cmd`/`hold` of a labelled pane whose program it can't
-  recognise.
+`cmd` starts fresh; `resume` continues; `hold` types without enter. Optional `hub_name` is used
+only with `hub = true`; taken names get a session prefix. Saving preserves handwritten
+commands/hold for labelled panes it cannot recognise.
 
-## Settings
+```sh
+rex-agents template-save SESSION_ID NAME --window WINDOW_ID
+rex-agents template-open NAME --fresh
+rex-agents template-list
+rex-agents park SESSION_ID NAME
+rex-agents tab-to-session SESSION_ID WINDOW_ID NAME
+rex-agents start-pending NAME
+```
 
-`~/.config/rex/rex-agents.local.lua` returns a table (see `examples/rex-agents.local.lua`):
-extra `viewers`, `labelled` panes (`label` + `cwd_suffix` → `cmd`, optional `running.socket`,
-`ready = true` or `ready.path` and `ready.timeout` in seconds, default 30), service panes (`services.labels`
-and the init.lua `services.action` to run), `keep_missing`, and `notify = false` to turn off the
-notice after a restart.
+## Internals and safety
 
-Environment overrides, mainly for tests: `REX_AGENTS_STATE`, `REX_AGENTS_TEMPLATES`,
-`REX_AGENTS_CLAUDE_SESSIONS`, `REX_AGENTS_CONFIG`, `REX_AGENTS_SERVER`,
-`REX_AGENTS_WATCH_LABEL` (the LaunchAgent `status`/`verify` check; `-` skips the check),
-`REX_AGENTS_NOTIFY_CMD` (a program run as `CMD TITLE TEXT` instead of `osascript`), and
-`REX_AGENTS_REX` (the `rex` binary; `bin/rex-agents` sets it to the one it runs, so the services
-`rex do -s` uses the same version).
+`core.lua` classifies, saves and restores panes; `cli.lua` exposes commands; `actions.lua`
+registers keys; `watch.lua` saves at startup, every two minutes and 20 seconds after process
+changes. `procargs.js` reads exact argv via macOS sysctl using osascript's JavaScript bridge.
+Claude session IDs come from `~/.claude/sessions/<pid>.json`, including relaunched children;
+launch flags come from argv or `CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS`. Only that variable
+and (with hub enabled) `HUB_NAME` are read from process environments. Amp thread IDs come from
+open `threads/T-….log` files via `lsof`. These agent internals may change upstream.
 
-## Safety notes
+`panes.json` maps block IDs to commands and Rex server instance IDs. Saves are atomic, with
+a `panes.prev.json` backup. A save is skipped if no sessions are visible or Rex restarts during
+the scan. An idle shell drops its entry only if it ran on the current server; entries survive
+server restarts. Missing panes are kept for `keep_missing` seconds (default one week).
 
-- Up to Rex CLI 0.1.0-preview.18, when `REX_SERVER` names a server that isn't answering, the
-  `rex` CLI quietly falls back to your home server (fixed in preview.19). `bin/rex-agents`
-  therefore always passes `-S` (the pane's own `REX_SERVER`, or `REX_AGENTS_SERVER`), and
-  `tests/e2e.sh` does the same.
-- Nothing here stops or restarts a Rex server.
-- The duplicate guard reads exact argv, not shell aliases or arbitrary command compositions.
-  An unreadable candidate that still exists stops the check rather than allowing a duplicate.
-  For a program that replaces itself with unrelated argv, configure `running.socket` instead.
-  External/manual starts can race the check; the program itself must enforce a strict singleton.
-- Labelled launches sharing a state directory are serialized with `labelled-start.lock`. A
-  launch not confirmed within 10 seconds warns and releases the lock (when readiness is the
-  running probe, its timeout applies instead). Abandoned locks at least two minutes old are
-  removed on the next launch attempt. Long readiness waits can outlive this lease; slow starts
-  and retries still need program-level singleton protection. Separate state directories do
-  not share this lock. Service actions remain user-owned code and must avoid duplicates themselves.
+Revive rechecks every pane immediately before typing and waits up to 10 seconds for starting
+shells. It never types into a busy program or a shell nested inside another shell. Floating
+panes are not recorded. In-memory program state cannot be restored.
+
+Every test client is pinned with `-S`; this avoids preview.18's fallback to the home server
+when an environment-selected server is unavailable (fixed upstream in preview.19).
+On preview.20, newly created block ownership does not prevent the `write` used by start-pending.
+
+Labelled launches share a `labelled-start.lock`. Unconfirmed launches warn and release it
+after 10 seconds (or the running-readiness timeout). Locks at least two minutes old expire.
+External starts, separate state directories and readiness waits longer than the lease can
+race this check. Strict singleton enforcement belongs in the program itself. Service actions
+must avoid duplicates themselves. Nothing here stops or restarts a Rex server.
+
+Test overrides: `REX_AGENTS_STATE`, `REX_AGENTS_TEMPLATES`, `REX_AGENTS_CLAUDE_SESSIONS`,
+`REX_AGENTS_CONFIG`, `REX_AGENTS_SERVER`, `REX_AGENTS_REX`, `REX_AGENTS_WATCH_LABEL` (`-` skips
+launchd inspection), and `REX_AGENTS_NOTIFY_CMD` (called as `CMD TITLE TEXT`). Homebrew supplies
+`REX_AGENTS_STABLE_ROOT` to setup.
 
 ## Tests
 
 ```sh
-rex do tests/unit.lua   # pure helpers (argv filtering, quoting, JSON, layouts)
-tests/e2e.sh            # full cycle on a private throwaway server with fake claude/amp binaries
-REX_BIN=/path/to/rex tests/e2e.sh   # the same with another Rex binary (server and clients)
+tests/e2e.sh
+REX_BIN=/path/to/rex tests/e2e.sh
+sh tests/setup.sh
+HOMEBREW_NO_AUTO_UPDATE=1 brew ruby tests/formula.rb   # local packaging only; no tap/install
+# Without Rex: Lua 5.1 and the test-only dkjson 2.8 module
+REX_AGENTS_CONFIG=/nonexistent lua tests/unit-runner.lua
 ```
 
-`e2e.sh` starts its own `rex server run` on a private socket, saves, restarts that server with
-SIGTERM to its own PID, checks the restart notice (through `REX_AGENTS_NOTIFY_CMD`), revives,
-parks and reopens a session, moves a tab to a new session, and checks every pane's argv.
+E2e requires `cc`, `jq`, `python3` and Rex; it runs the unit suite too. It starts only private
+throwaway servers and stops them with SIGTERM to verified test-owned PIDs. Fake agents cover
+save/restart/revive, templates, readiness, duplicate guards and hub opt-in/out. Setup tests use
+a disposable HOME **and stub launchctl and Rex**; HOME alone does not isolate launchd.
+macOS CI runs the same unit suite without Rex and the setup tests. E2e is tested locally on
+preview.18 and preview.20.
 
-Tested with Rex 0.1.0-preview.18 and 0.1.0-preview.20 (all e2e checks pass on both). On
-preview.20, blocks made by `session.create` are still owned by the client that created them; the
-current online docs describe blocks that start without an owner, which only affects `resize` and
-`set_theme`, not the `write` that start-pending uses.
+## License
 
-## Limits
-
-- macOS only (`osascript`, `lsof`, the `~/Library` paths).
-- Floating panes aren't recorded.
-- Revive retypes commands; it can't restore a program's in-memory state.
+[MIT](LICENSE), copyright Oliver Kriska.

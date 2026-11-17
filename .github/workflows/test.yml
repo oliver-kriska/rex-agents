@@ -1,0 +1,21 @@
+name: Tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test-only Lua runtime
+        run: |
+          brew install lua@5.1 luarocks
+          luarocks --lua-version=5.1 --lua-dir="$(brew --prefix lua@5.1)" --tree="$RUNNER_TEMP/rocks" install dkjson 2.8
+      - name: Unit tests without a Rex server
+        run: |
+          export REX_AGENTS_CONFIG="$RUNNER_TEMP/no-config.lua"
+          export LUA_PATH="$RUNNER_TEMP/rocks/share/lua/5.1/?.lua;;"
+          "$(brew --prefix lua@5.1)/bin/lua" tests/unit-runner.lua
+      - name: Setup and uninstall in a disposable HOME
+        run: sh tests/setup.sh
+      # Rex is distributed separately; tests/e2e.sh is run locally on supported previews.
