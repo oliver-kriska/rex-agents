@@ -542,6 +542,30 @@ function M.claude_flags(args)
       i = i + 1
     end
   end
+  return M.dedupe_flags(out)
+end
+
+-- Drop a flag group (a flag and the values after it) identical to an earlier one. Claude Code's
+-- relaunch (/restart, auto-update) passes the original arguments again, so `--allowed-tools X`
+-- groups repeat once per relaunch.
+function M.dedupe_flags(flags)
+  local groups, cur = {}, nil
+  for _, a in ipairs(flags) do
+    if starts_with(a, "-") or not cur then
+      cur = { a }
+      groups[#groups + 1] = cur
+    else
+      cur[#cur + 1] = a
+    end
+  end
+  local out, seen = {}, {}
+  for _, g in ipairs(groups) do
+    local k = table.concat(g, "\0")
+    if not seen[k] then
+      seen[k] = true
+      for _, a in ipairs(g) do out[#out + 1] = a end
+    end
+  end
   return out
 end
 
@@ -550,17 +574,46 @@ function M.claude_session(pid)
   return d
 end
 
+-- After /restart or an auto-update, Claude Code keeps the first `claude` process (the pane's
+-- foreground) and runs the new version as its child; only the child has a sessions file. Returns
+-- the pid of the first descendant (two levels deep) that has one.
+function M.claude_child(pid)
+  local function children(p)
+    local r = exec({ "pgrep", "-P", tostring(p) })
+    local out = {}
+    if r and r.ok then for c in r.stdout:gmatch("%d+") do out[#out + 1] = tonumber(c) end end
+    return out
+  end
+  for _, c in ipairs(children(pid)) do
+    local ok, d = pcall(M.claude_session, c)
+    if ok and type(d) == "table" and d.sessionId then return c end
+    for _, g in ipairs(children(c)) do
+      local ok2, d2 = pcall(M.claude_session, g)
+      if ok2 and type(d2) == "table" and d2.sessionId then return g end
+    end
+  end
+  return nil
+end
+
 local function claude_entry(pid, argv)
-  -- set by /restart: the flags the conversation was launched with
+  local ok, d = pcall(M.claude_session, pid)
+  if not ok or type(d) ~= "table" or not d.sessionId then
+    local child = M.claude_child(pid)
+    if child then
+      pid, d = child, M.claude_session(child)
+      argv = M.argv(child) or argv
+    end
+  end
+  -- set by /restart: the flags the conversation was launched with (empty means "use argv")
   local hint = M.proc_env(pid, "CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS")
   local flags
-  if hint ~= nil then
-    local ok, v = pcall(M.split, hint)
-    flags = ok and v or M.claude_flags(slice(argv, 2))
+  if hint ~= nil and hint:match("%S") then
+    local ok2, v = pcall(M.split, hint)
+    flags = ok2 and M.dedupe_flags(v) or M.claude_flags(slice(argv, 2))
   else
     flags = M.claude_flags(slice(argv, 2))
   end
-  local d = M.claude_session(pid)
+  if type(d) ~= "table" then d = nil end
   local sid = d and d.sessionId
   local fresh = concat({ "claude" }, flags)
   return { kind = "claude", fresh = fresh, revive = sid and concat(fresh, { "--resume", sid }) or nil,

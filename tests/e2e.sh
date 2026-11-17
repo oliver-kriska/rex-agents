@@ -249,5 +249,19 @@ jq -e '([.panes[].seen] | max) as $m | [.panes[] | select(.seen == $m) | .hub_na
   || { jq -c '[.panes[] | {session, label, hub_name, seen}]' "$P"; fail "hub names unique after template-open"; }
 ok "template-open: taken hub names get the session name in front"
 
+# ---- Claude Code relaunched itself (/restart, update): the session runs in a child process
+cat > "$T/relaunch.lua" <<EOF
+assert(rex.call("session.create", { label = "Relaunch", initial_windows = {
+  { window_label = "R", layout = { block = { flavor = "com.superlogical.terminal.shell", label = "re",
+    options = { cwd = "$T/w/plain", initial_input = "FAKE_RELAUNCH=1 CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS= claude --model opus --allowed-tools a --allowed-tools a\\r" } } } } } }))
+EOF
+rx do "$T/relaunch.lua" >/dev/null
+wait_for Relaunch re "^session "
+SID=$(pane Relaunch re | sed -n 's/^session //p' | head -1)
+"$RA" save >/dev/null
+jq -e --arg s "$SID" '[.panes[] | select(.session == "Relaunch")][0].revive == ["claude","--model","opus","--allowed-tools","a","--resume",$s]' "$P" >/dev/null \
+  || { jq -c '[.panes[] | select(.session == "Relaunch")]' "$P"; fail "relaunched claude: session from the child, flags deduped, empty hint ignored"; }
+ok "relaunched Claude Code: session id from the child process, repeated flags dropped"
+
 "$REX" --autostart=false -S "$URL" do "$ROOT/tests/unit.lua" | tail -1
 echo "all e2e checks passed"

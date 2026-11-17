@@ -18,6 +18,15 @@ int main(int argc, char **argv) {
   for (int i = 1; i < argc; i++) printf(" [%s]", argv[i]);
   printf("\n");
   printf("hub=%s\n", getenv("HUB_NAME") ? getenv("HUB_NAME") : "-");
+  if (strcmp(prog, "claude") == 0 && getenv("FAKE_RELAUNCH")) {
+    // like Claude Code after /restart or an update: this process stays, the session runs in a child
+    unsetenv("FAKE_RELAUNCH");
+    pid_t c = fork();
+    if (c == 0) { execvp(argv[0], argv); _exit(127); }
+    printf("relaunched child=%d\n", c);
+    fflush(stdout);
+    for (;;) pause();
+  }
   if (strcmp(prog, "claude") == 0) {
     for (int i = 1; i + 1 < argc; i++) if (!strcmp(argv[i], "--resume")) snprintf(id, sizeof id, "%s", argv[i+1]);
     if (!id[0]) uuid(id, 1);

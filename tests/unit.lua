@@ -113,6 +113,15 @@ check("layout hub slugged + hold", hl.split.after.block.options.initial_input, "
 check("layout hub renamed", A.rex_layout(htpl, true, function(n) return "p-" .. n end).split.before.block.options.initial_input,
   "HUB_NAME=p-mgr claude\r")
 
+-- repeated flag groups from Claude Code relaunches are dropped, order kept
+check("dedupe flags", A.dedupe_flags({ "--model", "x", "--allowed-tools", "a", "--allowed-tools", "b",
+  "--allowed-tools", "a", "--model", "x", "--verbose", "--verbose" }),
+  { "--model", "x", "--allowed-tools", "a", "--allowed-tools", "b", "--verbose" })
+check("dedupe keeps different values", A.dedupe_flags({ "--add-dir", "/a", "/b", "--add-dir", "/a" }),
+  { "--add-dir", "/a", "/b", "--add-dir", "/a" })
+check("claude flags dedupe", A.claude_flags({ "--resume", "id", "--model", "m", "--allowed-tools", "t",
+  "--model", "m", "--allowed-tools", "t" }), { "--model", "m", "--allowed-tools", "t" })
+
 -- save: skipped when the server changes during the scan; legacy alive_on ("PID@lstart") still
 -- counts as the running server. Uses stubs, a scratch state dir, no Rex calls.
 do

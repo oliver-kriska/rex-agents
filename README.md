@@ -100,8 +100,11 @@ rex-agents/
 foreground PID. Its exact argv comes from `procargs.js` (Rex's Lua has no FFI, and `ps` joins
 arguments with spaces, so a quoted prompt would turn into flag values). Claude Code's session ID
 comes from `~/.claude/sessions/<pid>.json`; its launch flags are its argv without the prompt and
-the conversation selector, or `CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS` when Claude Code set it on
-`/restart` (that variable and `HUB_NAME` are the only parts of a process environment ever read). Amp's thread ID
+the conversation selector, or `CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS` when Claude Code set it
+(non-empty) on `/restart`. After `/restart` or an update Claude Code keeps the first process and
+runs the new version as its child; the session file then belongs to the child, so rex-agents looks
+there too. Flag groups repeated by such relaunches (`--allowed-tools X` again and again) are
+written once (that variable and `HUB_NAME` are the only parts of a process environment ever read). Amp's thread ID
 is the `threads/T-….log` file it holds open (`lsof`).
 
 **Surviving restarts.** `~/.local/state/rex-agents/panes.json` maps block ID → command. Each
