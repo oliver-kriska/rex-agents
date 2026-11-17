@@ -8,52 +8,21 @@ concurrency:
 env:
   HOMEBREW_NO_AUTO_UPDATE: "1"
 jobs:
-  unit:
+  check:
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
-      - name: Test-only Lua runtime
-        run: |
-          brew install lua@5.4 luarocks
-          luarocks --lua-version=5.4 --lua-dir="$(brew --prefix lua@5.4)" --tree="$RUNNER_TEMP/rocks" install dkjson 2.8-2
-      - name: Unit tests without a Rex server
-        run: |
-          export REX_AGENTS_CONFIG="$RUNNER_TEMP/no-config.lua"
-          export LUA_PATH="$RUNNER_TEMP/rocks/share/lua/5.4/?.lua;;"
-          "$(brew --prefix lua@5.4)/bin/lua" tests/unit-runner.lua
-      - name: Setup and uninstall in a disposable HOME
-        run: sh tests/setup.sh
+      - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
+        with:
+          version: 2026.11.9
+          cache: true
+      - name: Lint, unit, setup and formula checks
+        run: make check
       # Rex is distributed separately. No unattended, version-pinned installer is configured;
       # run tests/e2e.sh locally on preview.18 and preview.20 before releasing.
-  lint:
-    runs-on: macos-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - name: Install linters
-        run: brew install shellcheck luacheck actionlint
-      - name: Shell scripts
-        run: git ls-files -z '*.sh' bin/rex-agents | xargs -0 shellcheck
-      - name: Lua 5.1 compatibility and Rex globals
-        run: luacheck rex-agents tests/*.lua examples/*.lua
-      - name: GitHub Actions
-        run: actionlint
-  formula:
-    runs-on: macos-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - name: Style and local packaging
-        run: |
-          brew style Formula/rex-agents.rb
-          brew ruby tests/formula.rb
       - name: Audit in a disposable CI tap
         run: |
           brew tap-new --no-git rex-agents/ci-test

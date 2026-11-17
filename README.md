@@ -486,35 +486,48 @@ Changes should include tests and accurate CLI/config documentation. Never test a
 work session. Open an issue or pull request with a minimal reproduction and tool versions;
 redact commands, paths and conversation IDs before sharing output.
 
+On macOS, install [mise](https://mise.jdx.dev/) 2026.11.9 or newer, Xcode Command Line Tools
+(`cc` and `make`) and Homebrew for the formula checks. Then, from the checkout:
+
 ```sh
-brew install lua@5.4 luarocks shellcheck luacheck actionlint
-luarocks --lua-version=5.4 --lua-dir="$(brew --prefix lua@5.4)" --tree=/tmp/rex-agents-rocks install dkjson 2.8-2
-REX_AGENTS_CONFIG=/nonexistent LUA_PATH='/tmp/rex-agents-rocks/share/lua/5.4/?.lua;;' \
-  "$(brew --prefix lua@5.4)/bin/lua" tests/unit-runner.lua
-git ls-files -z '*.sh' bin/rex-agents | xargs -0 shellcheck
-luacheck rex-agents tests/*.lua examples/*.lua
-actionlint
-HOMEBREW_NO_AUTO_UPDATE=1 brew style Formula/rex-agents.rb
-tests/e2e.sh
+mise install
+make check
+```
+
+`make check` selects the pinned tools through `mise exec`; shell activation is not required.
+It runs ShellCheck, Luacheck (Lua 5.1 globals), actionlint, unit tests, isolated setup/uninstall
+tests, Homebrew style and the packaging test. It never loads the real watcher or accesses a
+live Rex server. The strict Homebrew metadata audit runs separately in a disposable CI tap;
+`make check` does not alter your taps or install rex-agents.
+
+The asdf-format `.tool-versions` pins Lua 5.4.9, ShellCheck 0.11.0 and actionlint 1.7.12.
+The `aqua:` names select prebuilt releases through mise (plain asdf needs equivalent plugins).
+Luacheck 1.2.0 has no macOS binary: `mise.toml` pins its source archive and LuaRocks 3.13.0,
+including their SHA-256 digests and installation commands. It also pins argparse 0.7.1-1,
+LuaFileSystem 1.8.0-1 and test-only dkjson 2.8-2. Those install options need TOML, not a
+version-only row. Lua builds from source; allow a C compiler and network access on the first
+install. The Lua plugin also installs an optional LuaRocks copy, which these checks do not use.
+`.miserc.toml` stops parent-directory config discovery, so a parent `.tool-versions` cannot
+supply project tools. User-global mise settings still apply.
+
+Rex integration tests remain a separate, explicit step:
+
+```sh
 REX_BIN=/path/to/rex tests/e2e.sh
-sh tests/setup.sh
-HOMEBREW_NO_AUTO_UPDATE=1 brew ruby tests/formula.rb   # local packaging only; no tap/install
 ```
 
 E2e requires `cc`, `jq`, `python3` and Rex; it runs the unit suite too. It starts only private
 throwaway servers and stops them with SIGTERM to verified test-owned PIDs. Fake agents cover
 save/restart/revive, templates, readiness, duplicate guards and hub opt-in/out. Setup tests use
 a disposable HOME **and stub launchctl and Rex**; HOME alone does not isolate launchd.
-macOS CI runs the same unit suite without Rex and the setup tests. E2e is tested locally on
-preview.18 and preview.20. CI does not download Rex: no unattended, version-pinned distribution
-is configured. It runs ShellCheck, Luacheck (Lua 5.1 globals), actionlint, Homebrew style, the
-packaging test and a strict metadata audit in a disposable CI tap. None of those checks verifies
-the v0.1.0 tarball checksum; the release install check does.
+macOS CI installs and caches the same tools with SHA-pinned `jdx/mise-action`, then runs
+`make check`. E2e is tested locally on preview.18 and preview.20. CI does not download Rex:
+no unattended, version-pinned distribution is configured. Neither the packaging test nor
+the metadata audit verifies the v0.1.0 tarball checksum; the release install check does.
 
-Dependabot groups weekly GitHub Actions updates. There is no runtime package manifest;
-Homebrew tools and the test-only dkjson rock are maintained in the workflow, not by Dependabot.
-See [RELEASING.md](RELEASING.md) for the stable formula steps and [CHANGELOG.md](CHANGELOG.md)
-for release notes.
+Dependabot groups weekly GitHub Actions updates. It does not update `.tool-versions`,
+`mise.toml` or the mise version in CI. See [RELEASING.md](RELEASING.md#updating-development-tools)
+for tool bumps and stable formula steps, and [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## License
 

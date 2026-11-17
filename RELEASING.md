@@ -76,3 +76,29 @@ before announcing stable availability. Keep `head` in the formula for developmen
 After the stable installation check passes, create the GitHub release for the existing tag
 using the [changelog](CHANGELOG.md). Confirm the README's stable install commands work. No
 bottles are required: the formula installs scripts and Lua modules without compilation.
+
+## Updating development tools
+
+Dependabot updates GitHub Actions only. Review tool releases and update their exact pins
+in `.tool-versions` and `mise.toml` deliberately. To bump the registry-backed tools without
+upgrading user-global tools or the checksum-pinned source archives:
+
+```sh
+mise upgrade --bump --pin --no-global lua aqua:koalaman/shellcheck aqua:rhysd/actionlint
+```
+
+For LuaRocks or Luacheck, update the version and checksum together in `mise.toml`, using the
+digest of the upstream archive. Review the pinned argparse, LuaFileSystem and dkjson rock
+versions there too. After changing Lua or rock dependencies, rebuild the source tools even
+if their own versions did not change; their installed wrappers refer to the Lua build:
+
+```sh
+mise install --force http:luarocks http:luacheck
+make check
+```
+
+Update the README's version list and the CI mise version when appropriate. Keep the minimum
+mise version in `mise.toml` aligned with the config features used. Test a fresh checkout with
+empty `MISE_DATA_DIR`, `MISE_CACHE_DIR` and `MISE_CONFIG_DIR` before merging tool updates,
+then run Rex e2e on both supported versions. Homebrew's own formula lint/audit tooling follows
+Homebrew, rather than a mise pin. No development-tool update changes the installed extension.

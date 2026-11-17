@@ -1,0 +1,37 @@
+min_version = "2026.11.9"
+
+# These source installs need options that .tool-versions cannot express.
+# Use a pinned LuaRocks, not the optional latest copy bundled by the Lua plugin.
+[tools."http:luarocks"]
+version = "3.13.0"
+url = "https://luarocks.org/releases/luarocks-{{ version }}.tar.gz"
+checksum = "sha256:245bf6ec560c042cb8948e3d661189292587c5949104677f1eecddc54dbe7e37"
+strip_components = 1
+bin_path = "bin"
+depends = ["lua"]
+postinstall = '''
+set -eu
+cd "$MISE_TOOL_INSTALL_PATH"
+./configure --with-lua="$(mise -C "$MISE_CONFIG_ROOT" where lua)" --prefix="$MISE_TOOL_INSTALL_PATH"
+make
+make install
+'''
+
+# Luacheck publishes no macOS binary. Keep the existing Lua 5.1 checks and
+# install its dependencies explicitly so LuaRocks does not select newer ones.
+[tools."http:luacheck"]
+version = "1.2.0"
+url = "https://github.com/lunarmodules/luacheck/archive/refs/tags/v{{ version }}.tar.gz"
+checksum = "sha256:8efe62a7da4fdb32c0c22ec1f7c9306cbc397d7d40493c29988221a059636e25"
+strip_components = 1
+bin_path = "bin"
+depends = ["lua", "http:luarocks"]
+postinstall = '''
+set -eu
+cd "$MISE_TOOL_INSTALL_PATH"
+rocks="$(mise -C "$MISE_CONFIG_ROOT" where http:luarocks)/bin/luarocks"
+"$rocks" --tree="$MISE_TOOL_INSTALL_PATH" install argparse 0.7.1-1 --deps-mode=none
+"$rocks" --tree="$MISE_TOOL_INSTALL_PATH" install luafilesystem 1.8.0-1 --deps-mode=none
+"$rocks" --tree="$MISE_TOOL_INSTALL_PATH" install dkjson 2.8-2 --deps-mode=none
+"$rocks" --tree="$MISE_TOOL_INSTALL_PATH" make "rockspecs/luacheck-$MISE_TOOL_VERSION-1.rockspec" --deps-mode=none
+'''

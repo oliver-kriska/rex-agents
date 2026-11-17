@@ -1,0 +1,2 @@
+# Do not inherit tool versions from the directory containing this checkout.
+ceiling_paths = ["{{ config_root | dirname }}"]
