@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.0 — release candidate
+## v0.1.0 — 2026-11-17
 
 First public release of rex-agents, a macOS Lua extension for Rex.
 
@@ -18,6 +18,3 @@ First public release of rex-agents, a macOS Lua extension for Rex.
   uninstall that preserves user settings and state.
 - Test on Rex 0.1.0-preview.18 and preview.20; run standalone unit/setup tests and shell,
   Lua, workflow and formula checks in macOS CI.
-
-The v0.1.0 tag and stable formula checksum must be published before stable Homebrew
-installation is available. See [RELEASING.md](RELEASING.md).

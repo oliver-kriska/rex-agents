@@ -16,10 +16,6 @@ Viewers, labelled programs, service actions and project templates are optional.
 
 Run in a **Rex pane** after installing [Rex](https://www.superlogical.com/rex/):
 
-**Release preparation:** the stable formula targets v0.1.0 but still has a marked checksum
-placeholder. Until the tag and real checksum are published, replace the install line below
-with `brew install --HEAD rex-agents`. The placeholder cannot verify a download.
-
 ```sh
 brew tap oliver-kriska/rex-agents https://github.com/oliver-kriska/rex-agents
 brew install rex-agents
