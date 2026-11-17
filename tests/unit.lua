@@ -122,6 +122,21 @@ check("dedupe keeps different values", A.dedupe_flags({ "--add-dir", "/a", "/b",
 check("claude flags dedupe", A.claude_flags({ "--resume", "id", "--model", "m", "--allowed-tools", "t",
   "--model", "m", "--allowed-tools", "t" }), { "--model", "m", "--allowed-tools", "t" })
 
+-- sessions file with junk after the object
+check("leading object", A.leading_json_object('{"a":"x}","b":{"c":1}}}\n'), '{"a":"x}","b":{"c":1}}')
+check("leading object escaped quote", A.leading_json_object('{"a":"\\"}"}x'), '{"a":"\\"}"}')
+check("leading object none", A.leading_json_object("nope"), nil)
+-- names.json: only running agents with a valid name, with their pids
+local nd = A.names_doc({
+  b1 = { kind = "claude", hub_name = "mgr", session = "S", session_id = "s1" },
+  b2 = { kind = "labelled", hub_name = nil },
+  b3 = { kind = "amp", hub_name = "amp-x", session = "S", session_id = "s1" },
+  b4 = { kind = "claude", hub_name = "idle-one" },
+}, { b1 = { 10, 11 }, b2 = { 12 }, b3 = { 13 } }, "inst", 99)
+check("names version", nd.version, 1)
+check("names b1", { nd.blocks.b1.hub_name, nd.blocks.b1.pids[1], nd.blocks.b1.pids[2] }, { "mgr", 10, 11 })
+check("names skips non-agents and not running", { nd.blocks.b2 == nil, nd.blocks.b4 == nil, nd.blocks.b3 ~= nil }, { true, true, true })
+
 -- save: skipped when the server changes during the scan; legacy alive_on ("PID@lstart") still
 -- counts as the running server. Uses stubs, a scratch state dir, no Rex calls.
 do

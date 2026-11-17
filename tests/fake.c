@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
     const char *nm = getenv("FAKE_NAME"), *ns = getenv("FAKE_NAME_SOURCE");
     fprintf(f, "{\"pid\":%d,\"sessionId\":\"%s\",\"cwd\":\"%s\",\"status\":\"%s\"", getpid(), id, getcwd(NULL,0), st);
     if (nm) fprintf(f, ",\"name\":\"%s\",\"nameSource\":\"%s\"", nm, ns ? ns : "user");
-    fprintf(f, "}\n");
+    fprintf(f, getenv("FAKE_BROKEN") ? "}}\n" : "}\n"); // FAKE_BROKEN: a stray "}" like Claude Code issue #104810
     fclose(f);
     printf("session %s\n", id);
   } else if (strcmp(prog, "amp") == 0) {

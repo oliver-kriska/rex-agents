@@ -27,6 +27,7 @@ M.paths = {
 M.paths.snap = M.paths.state .. "/panes.json"
 M.paths.prev = M.paths.state .. "/panes.prev.json"
 M.paths.pending = M.paths.state .. "/pending.json"
+M.paths.names = M.paths.state .. "/names.json"
 
 local REX_APP_BIN = HOME .. "/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS"
 M.PATH = table.concat({ HOME .. "/.local/bin", HOME .. "/.amp/bin", HOME .. "/bin", "/opt/homebrew/bin",
@@ -198,7 +199,7 @@ M.expand_home = expand_home
 local KEY_ORDER = {}
 for i, k in ipairs({
   -- top level of panes.json and of a template
-  "server", "name", "saved_at", "panes", "windows",
+  "version", "server", "name", "saved_at", "panes", "windows", "blocks",
   -- a saved pane
   "kind", "fresh", "revive", "note", "session_id", "session", "window",
   -- a template block (label/cwd are also the next keys of a saved pane), window, split
@@ -207,7 +208,7 @@ for i, k in ipairs({
   "seen", "alive_on",
 }) do KEY_ORDER[k] = i end
 
-local ARRAY_KEYS = set_of({ "fresh", "revive", "windows", "argv" })
+local ARRAY_KEYS = set_of({ "fresh", "revive", "windows", "argv", "pids" })
 
 local function num(x)
   if x == math.floor(x) and math.abs(x) < 2 ^ 53 then return string.format("%d", x) end
@@ -569,9 +570,45 @@ function M.dedupe_flags(flags)
   return out
 end
 
+-- Claude Code's sessions/<pid>.json. Claude Code has been seen leaving stray characters after the
+-- object (a trailing "}"), which makes the whole file invalid JSON; only the leading object is read.
+function M.leading_json_object(s)
+  if type(s) ~= "string" then return nil end
+  local start = s:find("{", 1, true)
+  if not start then return nil end
+  local depth, in_str, esc = 0, false, false
+  for i = start, #s do
+    local c = s:sub(i, i)
+    if in_str then
+      if esc then esc = false elseif c == "\\" then esc = true elseif c == '"' then in_str = false end
+    elseif c == '"' then in_str = true
+    elseif c == "{" then depth = depth + 1
+    elseif c == "}" then
+      depth = depth - 1
+      if depth == 0 then return s:sub(start, i) end
+    end
+  end
+  return nil
+end
+
 function M.claude_session(pid)
-  local d = M.read_json(M.paths.claude_sessions .. "/" .. tostring(pid) .. ".json")
-  return d
+  local raw = read_file(M.paths.claude_sessions .. "/" .. tostring(pid) .. ".json")
+  if not raw then return nil end
+  local ok, d = pcall(rex.json.decode, raw)
+  if ok and type(d) == "table" then return d end
+  local obj = M.leading_json_object(raw)
+  if not obj then return nil end
+  ok, d = pcall(rex.json.decode, obj)
+  return ok and type(d) == "table" and d or nil
+end
+
+-- The sessions file of a running Claude Code: its own, or its relaunched child's (see claude_child).
+function M.claude_session_of(pid)
+  local d = M.claude_session(pid)
+  if type(d) == "table" and d.sessionId then return d, pid end
+  local c = M.claude_child(pid)
+  if c then return M.claude_session(c), c end
+  return d, pid
 end
 
 -- After /restart or an auto-update, Claude Code keeps the first `claude` process (the pane's
@@ -597,8 +634,9 @@ end
 
 local function claude_entry(pid, argv)
   local ok, d = pcall(M.claude_session, pid)
+  local child
   if not ok or type(d) ~= "table" or not d.sessionId then
-    local child = M.claude_child(pid)
+    child = M.claude_child(pid)
     if child then
       pid, d = child, M.claude_session(child)
       argv = M.argv(child) or argv
@@ -615,10 +653,15 @@ local function claude_entry(pid, argv)
   end
   if type(d) ~= "table" then d = nil end
   local sid = d and d.sessionId
+  if not sid then -- last resort: the conversation it was started with
+    for i = 2, #argv - 1 do
+      if (argv[i] == "--resume" or argv[i] == "-r") and argv[i + 1]:match("^%x+%-%x+%-%x+%-%x+%-%x+$") then sid = argv[i + 1] end
+    end
+  end
   local fresh = concat({ "claude" }, flags)
   return { kind = "claude", fresh = fresh, revive = sid and concat(fresh, { "--resume", sid }) or nil,
     note = (not sid) and "no session ID found" or nil,
-    _name = d and d.name, _name_source = d and d.nameSource }
+    _name = d and d.name, _name_source = d and d.nameSource, _child = child }
 end
 
 -- ---- Amp -------------------------------------------------------------------------------------
@@ -694,6 +737,8 @@ function M.classify(leaf)
   if prog == "claude" then e = claude_entry(pid, argv) elseif prog == "amp" then e = amp_entry(pid, argv) end
   if e then
     e._env_hub = M.proc_env(pid, "HUB_NAME") -- set when rex-agents started it
+    e._pids = { tonumber(pid), e._child } -- the agent's processes, for names.json
+    e._child = nil
     return e
   end
   if VIEWERS[prog] then
@@ -803,6 +848,22 @@ local function assign_hub_names(panes, live, old)
   for _, e in pairs(panes) do e._name, e._name_source, e._env_hub = nil, nil, nil end
 end
 
+-- names.json: a published, versioned map block ID → hub name of every agent RUNNING now, so a tool
+-- inside an agent (the hub's MCP server) can find its name through $REX_BLOCK when HUB_NAME isn't
+-- set. `pids` are the agent's processes (the pane's foreground program and, after a Claude Code
+-- relaunch, its child); a reader should accept the name only if one of them is its ancestor, so a
+-- nested agent started inside that pane doesn't take it. Format version 1 is kept stable; see README.
+function M.names_doc(panes, pids, server, now)
+  local blocks = {}
+  for bid, p in pairs(pids) do
+    local e = panes[bid]
+    if e and AGENT_KINDS[e.kind] and M.hub_valid(e.hub_name) then
+      blocks[bid] = { hub_name = e.hub_name, kind = e.kind, session = e.session, session_id = e.session_id, pids = p }
+    end
+  end
+  return { version = 1, saved_at = now, server = server, blocks = blocks }
+end
+
 -- "HUB_NAME=<name> " for an agent entry, else "".
 function M.hub_prefix(e)
   if e and AGENT_KINDS[e.kind] and M.hub_valid(e.hub_name) then return "HUB_NAME=" .. e.hub_name .. " " end
@@ -851,7 +912,7 @@ function M.save()
     return { skipped = "no sessions visible yet, kept the previous save" }
   end
   local now = os.time()
-  local panes, live, count, legacy = {}, {}, 0, {}
+  local panes, live, count, legacy, pids = {}, {}, 0, {}, {}
   for _, v in ipairs(views) do
     for _, w in ipairs(v.windows) do
       for _, leaf in ipairs(M.leaves(w.layout)) do
@@ -859,6 +920,7 @@ function M.save()
         live[bid] = true
         local e = M.classify(leaf)
         local prev = old.panes[bid]
+        if e and e._pids then pids[bid], e._pids = e._pids, nil end
         if e then
           e.session_id, e.session, e.window = v.session_id, v.label, w.label
           e.label, e.cwd, e.seen, e.alive_on = leaf.label, leaf.cwd, now, server
@@ -884,6 +946,7 @@ function M.save()
   for _ in pairs(panes) do count = count + 1 end
   if read_file(M.paths.snap) then copy_file(M.paths.snap, M.paths.prev) end
   M.write_json(M.paths.snap, { server = server or old.server, saved_at = now, panes = panes }, "600")
+  M.write_json(M.paths.names, M.names_doc(panes, pids, server, now), "600")
   return { panes = count }
 end
 
@@ -966,7 +1029,9 @@ function M.verify(against)
     if not e.kind then
       err("no kind: %s", where(bid, e))
     elseif e.kind ~= "services" and (type(e.revive) ~= "table" or #e.revive == 0) then
-      if e.note then no_cmd = no_cmd + 1 else err("no revive command: %s", where(bid, e)) end
+      if not e.note then err("no revive command: %s", where(bid, e))
+      elseif live[bid] then warn("open pane's agent can't be resumed (%s): %s", e.note, where(bid, e))
+      else no_cmd = no_cmd + 1 end
     end
     if AGENT_KINDS[e.kind] then
       if e.hub_name ~= nil and not M.hub_valid(e.hub_name) then err("invalid hub name %q: %s", tostring(e.hub_name), where(bid, e)) end
@@ -987,7 +1052,7 @@ function M.verify(against)
   end
   local age = snap.saved_at and (os.time() - snap.saved_at)
   note("%d entries, %d live agents, last save %s", count, agents, age and (age .. " s ago") or "unknown")
-  if no_cmd > 0 then note("%d panes can't be resumed and are skipped by revive (e.g. Claude Code without a session ID)", no_cmd) end
+  if no_cmd > 0 then note("%d closed panes can't be resumed (e.g. Claude Code without a session ID); kept up to %d days", no_cmd, math.floor(M.config.keep_missing / 86400)) end
   if age and age > 300 then warn("last save was %d s ago (the watcher saves every 2 min)", age) end
   local server = M.server_id()
   if server and snap.server and not M.same_server(snap.server, server, {}) then
@@ -1037,6 +1102,8 @@ function M.verify(against)
         elseif e.kind ~= o.kind then
           changed = changed + 1
           err("kind changed %s → %s: %s", tostring(o.kind), tostring(e.kind), where(bid, e))
+        elseif (o.revive == nil or #o.revive == 0) and e.revive and #e.revive > 0 then
+          note("now resumable: %s", where(bid, e))
         elseif M.join(e.revive or {}) ~= M.join(o.revive or {}) then
           changed = changed + 1
           err("revive command changed: %s\n    was: %s\n    now: %s", where(bid, e), M.join(o.revive or {}), M.join(e.revive or {}))
@@ -1347,8 +1414,8 @@ function M.busy_claude(v)
       if leaf.pid and not SHELLS[leaf.fg] then
         local argv = M.argv(leaf.pid)
         if argv and basename(argv[1]) == "claude" then
-          local d = M.claude_session(leaf.pid)
-          if d and d.status == "busy" then busy[#busy + 1] = d.cwd or d.sessionId end
+          local d = M.claude_session_of(leaf.pid)
+          if type(d) == "table" and d.status == "busy" then busy[#busy + 1] = d.cwd or d.sessionId end
         end
       end
     end

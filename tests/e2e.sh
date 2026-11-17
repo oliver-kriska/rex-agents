@@ -212,8 +212,10 @@ ok "status after revive: all ok; verify catches duplicates, leaked fields, chang
 
 # ---- (c) park and reopen
 PARK=$(rx ls --json | jq -r '.sessions[] | select(.label == "Park Me") | .session_id')
+sed -i '' 's/"status":"idle"/"status":"busy"/' "$T"/claude/*.json  # revived fakes start idle; mark the turn busy
 echo y | "$RA" park "$PARK" >"$T/park.txt"
 grep -q "Reopen later with" "$T/park.txt" || fail "park hint"
+grep -q "Still working" "$T/park.txt" || fail "park warns about a busy Claude turn"
 rx ls --json | jq -e '[.sessions[] | select(.label == "Park Me")] | length == 0' >/dev/null || fail "park must close the session"
 jq -e '.windows[0].layout.split.before.block.resume | test("^claude --model opus --resume ")' "$T/templates/park-me.json" >/dev/null || fail "template resume"
 jq -e '.windows[0].layout.split.before.block.hub_name == "busy" and .windows[0].layout.split.after.block.hub_name == "thread"' "$T/templates/park-me.json" >/dev/null || fail "template hub names"
@@ -262,6 +264,27 @@ SID=$(pane Relaunch re | sed -n 's/^session //p' | head -1)
 jq -e --arg s "$SID" '[.panes[] | select(.session == "Relaunch")][0].revive == ["claude","--model","opus","--allowed-tools","a","--resume",$s]' "$P" >/dev/null \
   || { jq -c '[.panes[] | select(.session == "Relaunch")]' "$P"; fail "relaunched claude: session from the child, flags deduped, empty hint ignored"; }
 ok "relaunched Claude Code: session id from the child process, repeated flags dropped"
+
+# ---- names.json: running agents by block, with their processes; a broken sessions file still reads
+cat > "$T/broken.lua" <<EOF
+assert(rex.call("session.create", { label = "Broken", initial_windows = {
+  { window_label = "B", layout = { block = { flavor = "com.superlogical.terminal.shell", label = "brk",
+    options = { cwd = "$T/w/plain", initial_input = "FAKE_BROKEN=1 claude --model opus\\r" } } } } } }))
+EOF
+rx do "$T/broken.lua" >/dev/null
+wait_for Broken brk "^session "
+"$RA" save >/dev/null
+jq -e '[.panes[] | select(.session == "Broken")][0].revive | index("--resume") != null' "$P" >/dev/null || fail "sessions file with a stray } must still give the session id"
+N="$T/agents/names.json"
+[ "$(stat -f %Lp "$N")" = 600 ] || fail "names.json must be private"
+jq -e '.version == 1 and (.server | length) > 0 and (.blocks | length) > 0' "$N" >/dev/null || fail "names.json shape"
+jq -e '[.blocks[].hub_name] | length == (unique | length)' "$N" >/dev/null || fail "names.json names unique"
+RB=$(rx block ls -s Relaunch --json | jq -r '.blocks[0].block_id')
+jq -e --arg b "$RB" '.blocks[$b].pids | length == 2' "$N" >/dev/null || { jq . "$N"; fail "relaunched claude lists both processes"; }
+CHILD=$(jq -r --arg b "$RB" '.blocks[$b].pids[1]' "$N")
+ps -o comm= -p "$CHILD" | grep -q claude || fail "second pid is the running child"
+jq -e '[.blocks[] | select(.kind != "claude" and .kind != "amp" and .kind != "amp-runner")] | length == 0' "$N" >/dev/null || fail "names.json lists agents only"
+ok "names.json: private, versioned, unique names, agent pids incl. the relaunched child; tolerant sessions parse"
 
 "$REX" --autostart=false -S "$URL" do "$ROOT/tests/unit.lua" | tail -1
 echo "all e2e checks passed"

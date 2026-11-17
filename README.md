@@ -77,7 +77,8 @@ already has it:
 have a command, no duplicate names among live panes, no leftover helper fields), the watcher
 and the time of the last save, and exits 1 on a problem. With `--against`, a copy of
 `panes.json` taken before a change, it also lists entries that went missing and commands that
-changed; a pane you closed or a program you exited is only a warning.
+changed; a pane you closed or a program you exited is only a warning, and a pane that became
+resumable is reported as such. A live agent that can't be resumed is a warning naming the pane.
 
 Revive only types into a pane whose foreground program is a shell at its prompt, so it never
 starts anything twice. It checks each pane again right before typing (the picker may have been
@@ -137,6 +138,31 @@ Names are unique among live panes: a taken one gets the session name in front.
 `rex-agents status` shows each pane's name and whether its program already has it. Names follow
 `[A-Za-z0-9][A-Za-z0-9._-]*`, at most 64 characters. A program that is already running keeps
 its environment; it gets the name the next time rex-agents starts it.
+
+### `names.json`: names for programs already running
+
+A name reaches a program through `HUB_NAME` only when rex-agents starts it. For everything else,
+each save also writes `~/.local/state/rex-agents/names.json` (mode 600, atomic), a format kept
+stable for other tools:
+
+```json
+{
+  "version": 1,
+  "server": "<Rex server instance_id>",
+  "saved_at": 1794900000,
+  "blocks": {
+    "block:01a1…": { "hub_name": "worker-chief", "kind": "claude", "session": "Chief",
+                     "session_id": "session:01a1…", "pids": [41049, 33200] }
+  }
+}
+```
+
+Only agents running at the time of the save are listed, with unique names. `pids` are the agent's
+processes: the pane's foreground program and, after a Claude Code `/restart` or update, its
+relaunched child. A reader (for example a hub client with `HUB_NAME` unset) looks up `$REX_BLOCK`
+and should accept the name only if one of `pids` is its own ancestor (so a nested agent started
+inside that pane doesn't take it) and the file is recent (saves happen every 2 minutes).
+`HUB_NAME`, when set, always wins.
 
 ## Templates
 

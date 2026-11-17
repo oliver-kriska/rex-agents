@@ -2,7 +2,8 @@
 --
 --   rex --autostart=false do ~/.config/rex/rex-agents/watch.lua --all
 --
--- (the LaunchAgent in launchd/ does that and restarts it when the Rex server restarts).
+-- (the LaunchAgent com.rex-agents.watch that install.sh writes does that, and launchd restarts it
+-- whenever the Rex server restarts).
 -- It saves once at start, every INTERVAL seconds, and SOON seconds after a pane starts a
 -- program, so a freshly started agent is on disk before the next server restart.
 
