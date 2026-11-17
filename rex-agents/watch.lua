@@ -6,6 +6,8 @@
 -- whenever the Rex server restarts).
 -- It saves once at start, every INTERVAL seconds, and SOON seconds after a pane starts a
 -- program, so a freshly started agent is on disk before the next server restart.
+-- After a server restart, the first save under the new server is followed by one notification
+-- ("N agents can be brought back — press ⌘⇧B"); it never types into panes.
 
 local here = debug.getinfo(1, "S").source:match("^@?(.*)/[^/]+$") or "."
 package.path = here .. "/../?.lua;" .. here .. "/?.lua;" .. package.path
@@ -13,6 +15,18 @@ local A = require("rex-agents.core")
 
 local INTERVAL = tonumber(rex.args.interval) or 120
 local SOON = tonumber(rex.args.soon) or 20
+
+-- The server of the last save before this watcher's own: a different one means the Rex server
+-- restarted (launchd starts the watcher again when its connection drops).
+local prev_server = A.load_snap().server
+local notice_done = false
+
+local function restart_notice()
+  local ok, r = pcall(A.restart_notice, prev_server)
+  if ok and not r then return end -- no save under this server yet; try after the next one
+  notice_done = true
+  print(os.date("%Y-%m-%d %H:%M:%S") .. " restart notice: " .. (ok and r.why or ("failed: " .. tostring(r))))
+end
 
 local last
 local function save(why)
@@ -26,6 +40,7 @@ local function save(why)
     print(string.format("%s saved %d panes (%s)", stamp, r.panes, why))
   end
   if ok and r.panes then last = r.panes end
+  if ok and r.panes and not notice_done then restart_notice() end
   io.flush()
 end
 

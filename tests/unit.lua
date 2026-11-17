@@ -182,6 +182,16 @@ do
   A.exec({ "rm", "-rf", tmp })
 end
 
+-- restart notice: only after a real server change, once per server instance
+check("notice after a restart", A.restart_notice_due("inst-A", "inst-B", nil), true)
+check("notice: watcher restart only", A.restart_notice_due("inst-B", "inst-B", nil), false)
+check("notice: already sent for this server", A.restart_notice_due("inst-A", "inst-B", { server = "inst-B" }), false)
+check("notice: sent for an older server", A.restart_notice_due("inst-A", "inst-B", { server = "inst-A" }), true)
+check("notice: no earlier save", A.restart_notice_due(nil, "inst-B", nil), false)
+check("notice: server not answering", A.restart_notice_due("inst-A", nil, nil), false)
+check("notice text", A.restart_message(3), "3 agents can be brought back — press ⌘⇧B")
+check("notice text one", A.restart_message(1), "1 agent can be brought back — press ⌘⇧B")
+
 -- re-encode real templates for a byte diff against the originals
 if rex.args.templates then
   local r = A.exec({ "ls", "-1", rex.args.templates })

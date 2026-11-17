@@ -28,6 +28,7 @@ M.paths.snap = M.paths.state .. "/panes.json"
 M.paths.prev = M.paths.state .. "/panes.prev.json"
 M.paths.pending = M.paths.state .. "/pending.json"
 M.paths.names = M.paths.state .. "/names.json"
+M.paths.notified = M.paths.state .. "/notified.json"
 
 local REX_APP_BIN = HOME .. "/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS"
 M.PATH = table.concat({ HOME .. "/.local/bin", HOME .. "/.amp/bin", HOME .. "/bin", "/opt/homebrew/bin",
@@ -47,6 +48,8 @@ M.config = {
   services = { labels = {}, action = nil },
   -- seconds a saved pane whose block is gone is kept (server still starting, session hidden)
   keep_missing = 7 * 86400,
+  -- after a server restart, one macOS notification saying how many panes revive can bring back
+  notify = true,
 }
 
 local function set_of(list)
@@ -70,6 +73,7 @@ local function load_local_config()
     if extra.services.action then M.config.services.action = extra.services.action end
   end
   if extra.keep_missing then M.config.keep_missing = extra.keep_missing end
+  if extra.notify ~= nil then M.config.notify = extra.notify end
 end
 load_local_config()
 
@@ -1188,6 +1192,54 @@ function M.revive_plan()
   end)
   table.sort(services)
   return { todo = todo, services = services }
+end
+
+-- ---- notice after a server restart ------------------------------------------------------------
+
+-- Whether the restart notice is due: the save before the watcher started (PREV) was taken under
+-- another server than the one running now (CUR), and no notice went out for CUR yet. NOTIFIED is
+-- notified.json, which keeps a watcher that launchd restarts (or a second watcher) from repeating it.
+function M.restart_notice_due(prev, cur, notified, cache)
+  if prev == nil or cur == nil then return false end -- first install, or the server isn't answering
+  if M.same_server(prev, cur, cache or {}) then return false end -- only the watcher restarted
+  return not (type(notified) == "table" and notified.server == cur)
+end
+
+function M.restart_message(n)
+  return string.format("%d %s can be brought back — press ⌘⇧B", n, n == 1 and "agent" or "agents")
+end
+
+-- Show a macOS notification. REX_AGENTS_NOTIFY_CMD replaces osascript (tests); it gets TITLE TEXT.
+-- The texts travel as arguments of `on run argv`, so nothing in them is parsed as AppleScript.
+function M.notify(title, text)
+  local cmd = env("REX_AGENTS_NOTIFY_CMD", nil)
+  local argv = cmd and { cmd, title, text } or { "osascript",
+    "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run",
+    title, text }
+  local r, err = exec(argv)
+  if not r then return nil, err end
+  if not r.ok then return nil, trim((r.stderr or "") ~= "" and r.stderr or ("exit " .. tostring(r.code))) end
+  return true
+end
+
+-- Called by the watcher after each save until it returns non-nil. PREV is panes.json's server from
+-- before the watcher's first save. Returns { count, sent, why } once decided, or nil to try again
+-- after the next save (no save has happened under this server yet).
+function M.restart_notice(prev)
+  if M.config.notify == false then return { count = 0, why = "off (notify = false)" } end
+  local cur = M.server_id()
+  if cur == nil or M.load_snap().server ~= cur then return nil end -- the save under this server was skipped
+  local okn, notified = pcall(M.read_json, M.paths.notified)
+  if not M.restart_notice_due(prev, cur, okn and notified or nil) then
+    return { count = 0, why = "not due (no server restart, or already sent for this server)" }
+  end
+  local n = #M.revive_plan().todo
+  -- recorded before notifying: a failing notifier must not make every watcher restart try again
+  M.write_json(M.paths.notified, { server = cur, saved_at = os.time(), count = n }, "600")
+  if n == 0 then return { count = 0, why = "nothing to bring back" } end
+  local ok, err = M.notify("rex-agents", M.restart_message(n))
+  if not ok then return { count = n, why = "notify failed: " .. tostring(err) } end
+  return { count = n, sent = true, why = "sent: " .. M.restart_message(n) }
 end
 
 function M.revive_row(t)

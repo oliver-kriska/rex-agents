@@ -155,6 +155,34 @@ ok "status: ok / restart pending; verify passes"
 OLD_SERVER=$(jq -r .server "$P")
 stop_server
 start_server
+
+# ---- the watcher's notice after the restart: one per server instance, none with notify = false
+printf '#!/bin/sh\nprintf "%%s|%%s\\n" "$1" "$2" >>"%s/notified.txt"\n' "$T" >"$T/notify.sh"
+chmod +x "$T/notify.sh"
+: >"$T/notified.txt"
+sed 's/^return {/return { notify = false,/' "$T/local.lua" >"$T/quiet.lua"
+watch_once() { # watch_once CONFIG: run the watcher until it has decided on the notice, then stop it
+  REX_AGENTS_CONFIG="$1" REX_AGENTS_NOTIFY_CMD="$T/notify.sh" "$REX" --autostart=false -S "$URL" do "$ROOT/rex-agents/watch.lua" --all interval=3600 soon=3600 >"$T/watch.log" 2>&1 &
+  W=$!
+  i=0; until grep -q "restart notice: " "$T/watch.log"; do
+    i=$((i + 1)); [ $i -lt 100 ] || { cat "$T/watch.log"; fail "watcher did not save"; }; sleep 0.2
+  done
+  kill -TERM "$W"; wait "$W" 2>/dev/null || true
+}
+as_before_restart() { jq --arg s "$OLD_SERVER" '.server = $s' "$P" >"$T/p.json" && mv "$T/p.json" "$P"; }
+watch_once "$T/quiet.lua"
+[ ! -s "$T/notified.txt" ] || fail "notify = false: no notification"
+as_before_restart
+watch_once "$T/local.lua"
+[ "$(cat "$T/notified.txt")" = "rex-agents|11 agents can be brought back — press ⌘⇧B" ] || { cat "$T/notified.txt" "$T/watch.log"; fail "one notification after the restart"; }
+grep -q "restart notice: sent: 11 agents" "$T/watch.log" || fail "watcher logs the notice"
+watch_once "$T/local.lua"
+as_before_restart # a watcher that restarts before its own save under the new server: notified.json says done
+watch_once "$T/local.lua"
+[ "$(wc -l <"$T/notified.txt")" -eq 1 ] || { cat "$T/notified.txt"; fail "the notice must not repeat for the same server"; }
+[ "$(stat -f %Lp "$T/agents/notified.json")" = 600 ] || fail "notified.json must be private"
+ok "restart notice: once per server, nothing typed, off with notify = false"
+
 "$RA" save >/dev/null
 [ "$(jq '.panes | length' "$P")" = 12 ] || fail "restart must keep every saved pane"
 [ "$(jq -r .server "$P")" != "$OLD_SERVER" ] || fail "server id must change on restart"

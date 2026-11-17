@@ -122,6 +122,13 @@ versions hold `PID@start time` and are still recognised). A save:
 The LaunchAgent keeps the watcher alive (`KeepAlive`). When the server restarts the watcher's
 connection drops, it exits and launchd starts it again.
 
+**Notice after a restart.** When the watcher's first save runs under a new server (Rex's
+`instance_id` differs from the one in the previous save), it works out what ⌘⇧B would bring back
+and, if anything, shows one macOS notification: *rex-agents: N agents can be brought back — press
+⌘⇧B*. It never types into a pane. The server it notified for is kept in `notified.json`, so a
+watcher that launchd restarts doesn't repeat it. `notify = false` in the settings turns it off. A
+pane whose shell is still starting during that save isn't counted.
+
 ## Agent names (`HUB_NAME`)
 
 Every Claude Code and Amp pane rex-agents starts (revive, template-open, start-pending) gets
@@ -202,11 +209,13 @@ inside that pane doesn't take it) and the file is recent (saves happen every 2 m
 
 `~/.config/rex/rex-agents.local.lua` returns a table (see `examples/rex-agents.local.lua`):
 extra `viewers`, `labelled` panes (`label` + `cwd_suffix` → `cmd`), service panes (`services.labels`
-and the init.lua `services.action` to run), and `keep_missing`.
+and the init.lua `services.action` to run), `keep_missing`, and `notify = false` to turn off the
+notice after a restart.
 
 Environment overrides, mainly for tests: `REX_AGENTS_STATE`, `REX_AGENTS_TEMPLATES`,
 `REX_AGENTS_CLAUDE_SESSIONS`, `REX_AGENTS_CONFIG`, `REX_AGENTS_SERVER`,
-`REX_AGENTS_WATCH_LABEL` (the LaunchAgent `status`/`verify` check; `-` skips the check), and
+`REX_AGENTS_WATCH_LABEL` (the LaunchAgent `status`/`verify` check; `-` skips the check),
+`REX_AGENTS_NOTIFY_CMD` (a program run as `CMD TITLE TEXT` instead of `osascript`), and
 `REX_AGENTS_REX` (the `rex` binary; `bin/rex-agents` sets it to the one it runs, so the services
 `rex do -s` uses the same version).
 
@@ -227,8 +236,8 @@ REX_BIN=/path/to/rex tests/e2e.sh   # the same with another Rex binary (server a
 ```
 
 `e2e.sh` starts its own `rex server run` on a private socket, saves, restarts that server with
-SIGTERM to its own PID, revives, parks and reopens a session, moves a tab to a new session, and
-checks every pane's argv.
+SIGTERM to its own PID, checks the restart notice (through `REX_AGENTS_NOTIFY_CMD`), revives,
+parks and reopens a session, moves a tab to a new session, and checks every pane's argv.
 
 Tested with Rex 0.1.0-preview.18 and 0.1.0-preview.20 (all e2e checks pass on both). On
 preview.20, blocks made by `session.create` are still owned by the client that created them; the

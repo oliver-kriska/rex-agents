@@ -25,4 +25,8 @@ return {
 
   -- Seconds a saved pane whose block has disappeared is kept (default one week).
   -- keep_missing = 7 * 86400,
+
+  -- After a Rex server restart the watcher shows one macOS notification saying how many panes
+  -- ⌘⇧B can bring back (default on). It never types into panes.
+  -- notify = false,
 }
