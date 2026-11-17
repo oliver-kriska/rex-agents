@@ -26,6 +26,7 @@ jobs:
       - name: Audit in a disposable CI tap
         run: |
           brew tap-new --no-git rex-agents/ci-test
+          brew trust rex-agents/ci-test
           trap 'brew untap rex-agents/ci-test' EXIT
           cp Formula/rex-agents.rb "$(brew --repository rex-agents/ci-test)/Formula/rex-agents.rb"
           brew audit --strict --formula rex-agents/ci-test/rex-agents

@@ -18,9 +18,12 @@ Run in a **Rex pane** after installing [Rex](https://www.superlogical.com/rex/):
 
 ```sh
 brew tap oliver-kriska/rex-agents https://github.com/oliver-kriska/rex-agents
-brew install rex-agents
+brew install oliver-kriska/rex-agents/rex-agents
 rex-agents setup
 ```
+
+If Homebrew refuses to load a formula from an untrusted tap, trust it once with
+`brew trust oliver-kriska/rex-agents` and run the install again.
 
 To inspect setup before making changes, run `rex-agents setup --dry-run`. Then reload the config
 to activate the keys:

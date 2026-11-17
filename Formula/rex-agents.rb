@@ -3,7 +3,7 @@ class RexAgents < Formula
   homepage "https://github.com/oliver-kriska/rex-agents"
   url "https://github.com/oliver-kriska/rex-agents/archive/refs/tags/v0.1.0.tar.gz"
   # RELEASE BLOCKER: replace with the downloaded v0.1.0 tarball's SHA-256 before stable installation.
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "b799cb52a044e4c51af4f6c04f23c773e051cb57d4c56dcf8d734dbea711e466"
   license "MIT"
   head "https://github.com/oliver-kriska/rex-agents.git", branch: "main"
 
