@@ -509,6 +509,120 @@ function M.proc_env(pid, name)
   return info and info.env and info.env[name] or nil
 end
 
+-- A bare executable matches its absolute argv[0] too; arguments must match whole words.
+-- Never use the whitespace-split ps fallback for duplicate detection.
+function M.argv_prefix(argv, cmd)
+  if not argv or not cmd or #cmd == 0 or #argv < #cmd then return false end
+  for i, word in ipairs(cmd) do
+    local actual = argv[i]
+    if i == 1 and not word:find("/", 1, true) then actual = basename(actual) end
+    if actual ~= word then return false end
+  end
+  return true
+end
+
+-- Read exact argv only for possible matches. ps is a candidate filter, never the verdict.
+-- Include parents so a match below a foreground wrapper can be attributed to its Rex pane.
+function M.labelled_processes()
+  local r, err = exec({ "ps", "-ww", "-axo", "pid=,ppid=,args=" })
+  if not r or not r.ok then error("cannot check labelled processes: " .. tostring(err or (r and r.stderr)), 0) end
+  local pids, parents = {}, {}
+  for line in r.stdout:gmatch("[^\n]+") do
+    local pid, parent, args = line:match("^%s*(%d+)%s+(%d+)%s+(.*)$")
+    if pid then
+      parents[tonumber(pid)] = tonumber(parent)
+      for _, config in pairs(M.config.labelled) do
+        if args:find(basename(config.cmd[1]), 1, true) then
+          pids[#pids + 1] = pid
+          break
+        end
+      end
+    end
+  end
+  local matches = {}
+  if #pids == 0 then return matches, parents end
+  local result, why = exec(concat({ "osascript", "-l", "JavaScript", PROCARGS }, pids))
+  local data = result and result.ok and rex.json.decode(result.stdout)
+  if type(data) ~= "table" then error("cannot read exact labelled argv: " .. tostring(why), 0) end
+  for _, pid in ipairs(pids) do
+    if not data[pid] then
+      local alive = exec({ "ps", "-p", pid, "-o", "pid=" })
+      if not alive or alive.ok then error("cannot rule out a labelled program at pid " .. pid .. ": argv unavailable", 0) end
+    end
+  end
+  for pid, info in pairs(data) do
+    for label, config in pairs(M.config.labelled) do
+      if M.argv_prefix(info.argv, config.cmd) then
+        matches[label] = matches[label] or {}
+        table.insert(matches[label], tonumber(pid))
+      end
+    end
+  end
+  for _, list in pairs(matches) do table.sort(list) end
+  return matches, parents
+end
+
+function M.process_location(pid, parents, views)
+  local ancestors = {}
+  while pid and pid > 0 and not ancestors[pid] do
+    ancestors[pid] = true
+    pid = parents[pid]
+  end
+  for _, v in ipairs(views) do
+    for _, w in ipairs(v.windows) do
+      for _, leaf in ipairs(M.leaves(w.layout)) do
+        if ancestors[leaf.pid] then return v, leaf end
+      end
+    end
+  end
+end
+
+function M.labelled_running(label, matches, parents, views)
+  if not matches then matches, parents = M.labelled_processes() end
+  local pid = matches[label] and matches[label][1]
+  if not pid then return nil end
+  local v, leaf = M.process_location(pid, parents, views or M.snapshot())
+  return "already running (pid " .. pid .. (v and (", in " .. (v.label or v.session_id) .. " / " .. (leaf.label or leaf.block_id)) or "") .. ")"
+end
+
+-- Templates contain shell text, not argv. Guard only a complete command equal to the configured
+-- argv; shell compositions and wrappers are not inferred to be the same program.
+function M.labelled_command(text)
+  local ok, argv = pcall(M.split, text)
+  if not ok then return nil end
+  for label, config in pairs(M.config.labelled) do
+    if list_eq(argv, config.cmd) then return label end
+  end
+end
+
+function M.labelled_warnings(views, snap, matches, parents)
+  local warnings = {}
+  for label, config in pairs(M.config.labelled) do
+    local found = false
+    for _, v in ipairs(views) do
+      for _, w in ipairs(v.windows) do
+        for _, leaf in ipairs(M.leaves(w.layout)) do
+          if leaf.label == label and ends_with(leaf.cwd or "", config.cwd_suffix or "") then found = true end
+        end
+      end
+    end
+    if not found then warnings[#warnings + 1] = label .. ": configuration matches no pane" end
+    for _, pid in ipairs(matches[label] or {}) do
+      local v, leaf = M.process_location(pid, parents, views)
+      if v and (leaf.label ~= label or not ends_with(leaf.cwd or "", config.cwd_suffix or "")) then
+        warnings[#warnings + 1] = label .. ": runs in " .. (v.label or v.session_id) .. "/" .. (leaf.label or leaf.block_id) .. ", not in its labelled pane"
+      end
+    end
+    for _, e in pairs(snap.panes) do
+      if e.kind == "labelled" and e.label == label and not list_eq(e.revive, config.cmd) then
+        warnings[#warnings + 1] = label .. ": saved revive differs from current config cmd (revive uses current config)"
+      end
+    end
+  end
+  table.sort(warnings)
+  return warnings
+end
+
 -- ---- Claude Code -----------------------------------------------------------------------------
 
 local C_VALUE = set_of({ "--model", "--permission-mode", "--settings", "--append-system-prompt", "--system-prompt",
@@ -966,7 +1080,7 @@ function M.watcher()
   return { label = label, loaded = true, pid = tonumber(r.stdout:match('"PID"%s*=%s*(%d+)')) }
 end
 
--- One row per live pane that runs an agent, or ran one before the server restarted:
+-- One row per classified or saved pane, including missing and unresumable panes:
 -- { session, session_id, window, label, block_id, kind, hub_name, env_hub, state }. state is
 --   ok               the program runs with HUB_NAME = its hub name
 --   restart pending  it runs without HUB_NAME; it gets the name the next time rex-agents starts it
@@ -976,26 +1090,47 @@ end
 -- Reads the panes and the last save; changes nothing.
 function M.status()
   local snap = M.load_snap()
-  local rows = {}
-  for _, v in ipairs(M.snapshot()) do
+  local rows, seen = {}, {}
+  local views = M.snapshot()
+  local matches, parents = M.labelled_processes()
+  for _, v in ipairs(views) do
     for _, w in ipairs(v.windows) do
       for _, leaf in ipairs(M.leaves(w.layout)) do
         local bid = leaf.block_id
         local saved = snap.panes[bid]
-        local e = M.classify(leaf)
-        local running = e and AGENT_KINDS[e.kind]
-        if running or (saved and AGENT_KINDS[saved.kind]) then
-          local hub, env_hub = saved and saved.hub_name, e and e._env_hub
+        seen[bid] = true
+        local classified = M.classify(leaf)
+        local e = classified or saved
+        if e then
+          local hub, env_hub = saved and saved.hub_name, classified and classified._env_hub
+          local pane = M.pane_state(v.session_id, bid)
+          local reason
+          if e.kind == "services" and not M.config.services.action then reason = "no services action configured"
+          elseif e.kind == "labelled" and not M.config.labelled[e.label or leaf.label] then reason = "labelled configuration removed"
+          elseif e.kind ~= "services" and (not e.revive or #e.revive == 0) then reason = e.note or "no revive command" end
           local state
-          if not running then state = "not running"
+          if reason then state = "cannot resume: " .. reason
+          elseif e.kind == "labelled" then
+            state = M.labelled_running(e.label or leaf.label, matches, parents, views) or (pane == "idle" and "not running" or ("pane is " .. pane))
+          elseif pane == "idle" then state = "not running"
+          elseif pane ~= "busy" then state = "pane is " .. pane
+          elseif not classified then state = "busy (different program)"
+          elseif not AGENT_KINDS[e.kind] then state = "running"
           elseif not hub then state = "not saved yet"
           elseif env_hub == hub then state = "ok"
           elseif env_hub then state = "runs as " .. env_hub
           else state = "restart pending" end
           rows[#rows + 1] = { session = v.label, session_id = v.session_id, window = w.label, label = leaf.label,
-            block_id = bid, kind = running and e.kind or saved.kind, hub_name = hub, env_hub = env_hub, state = state }
+            block_id = bid, kind = e.kind, hub_name = hub, env_hub = env_hub, state = state, reason = reason }
         end
       end
+    end
+  end
+  for bid, e in pairs(snap.panes) do
+    if not seen[bid] then
+      rows[#rows + 1] = { session = e.session, session_id = e.session_id, window = e.window,
+        label = e.label, block_id = bid, kind = e.kind, hub_name = e.hub_name,
+        state = "pane missing", reason = e.note or "pane missing" }
     end
   end
   table.sort(rows, function(a, b)
@@ -1004,7 +1139,8 @@ function M.status()
     for i = 1, 4 do if ka[i] ~= kb[i] then return ka[i] < kb[i] end end
     return false
   end)
-  return { rows = rows, saved_at = snap.saved_at, watcher = M.watcher() }
+  return { rows = rows, saved_at = snap.saved_at, watcher = M.watcher(),
+    warnings = M.labelled_warnings(views, snap, matches, parents) }
 end
 
 -- Check panes.json, the watcher and (with AGAINST, a copy of panes.json taken before a change)
@@ -1024,6 +1160,9 @@ function M.verify(against)
     return { errors = errors, warnings = warnings, info = info }
   end
   local live = M.live_block_ids()
+  local views = M.snapshot()
+  local matches, parents = M.labelled_processes()
+  for _, warning in ipairs(M.labelled_warnings(views, snap, matches, parents)) do warn("%s", warning) end
   local count, agents, holders, no_cmd = 0, 0, {}, 0
   for bid, e in pairs(snap.panes) do
     count = count + 1
@@ -1159,39 +1298,117 @@ function M.type_into(sid, bid, text)
   return block_call(sid, "write", { block_id = bid, data = "\r" })
 end
 
+function M.wait_ready(label)
+  local ready = M.config.labelled[label].ready
+  if not ready then return end
+  local path = expand_home(ready.path)
+  local deadline = os.time() + (ready.timeout or 30)
+  repeat
+    local r = exec({ "test", "-e", path }) -- includes sockets, which io.open cannot read
+    if r and r.ok then return end
+    if os.time() >= deadline or not rex.sleep then break end
+    rex.sleep(0.2)
+  until false
+  return label .. ": readiness timed out waiting for " .. path .. "; continuing"
+end
+
+-- Serialize labelled launches using this state directory until the exact program appears.
+-- A crash or unconfirmed launch leaves the lock behind rather than risk starting another copy.
+function M.start_command(sid, bid, text, label, hold)
+  local keep_lock = false
+  local function start()
+    local deadline = os.time() + 10
+    local state = M.pane_state(sid, bid)
+    while state == "starting" and os.time() < deadline and rex.sleep do
+      rex.sleep(0.3)
+      state = M.pane_state(sid, bid)
+    end
+    if state ~= "idle" then return nil, "pane is " .. state end
+    -- Check after waiting for the shell, not only when the picker or template was opened.
+    if label then
+      local reason = M.labelled_running(label)
+      if reason then return nil, reason end
+    end
+    if hold then
+      return block_call(sid, "write", { block_id = bid, data = text })
+    end
+    keep_lock = label ~= nil
+    local ok, err = M.type_if_idle(sid, bid, text, 0)
+    if not ok or not label then return ok, err end
+    deadline = os.time() + 10
+    repeat
+      if M.labelled_running(label) then keep_lock = false; break end
+      if os.time() >= deadline or not rex.sleep then break end
+      rex.sleep(0.2)
+    until false
+    if keep_lock then return ok, label .. ": launch unconfirmed; labelled-start.lock retained; inspect before retrying" end
+    return ok, M.wait_ready(label)
+  end
+  if not label then return start() end
+  mkdir(M.paths.state)
+  local lock = M.paths.state .. "/labelled-start.lock"
+  local r = exec({ "mkdir", lock })
+  if not r or not r.ok then return nil, "labelled launch locked: " .. lock end
+  local ok, result, detail = pcall(start)
+  if not keep_lock then exec({ "rmdir", lock }) end
+  if not ok then return nil, tostring(result) end
+  return result, detail
+end
+
 -- What revive would do now: { todo = { {bid, sid, entry, line} }, services = { sid... } }.
 function M.revive_plan()
   local snap = M.load_snap()
   local live = {}
-  for _, v in ipairs(M.snapshot()) do
+  local views = M.snapshot()
+  local matches, parents = M.labelled_processes()
+  for _, v in ipairs(views) do
     for _, w in ipairs(v.windows) do
       for _, leaf in ipairs(M.leaves(w.layout)) do live[leaf.block_id] = { sid = v.session_id, leaf = leaf } end
     end
   end
-  local todo, services, seen_sid = {}, {}, {}
+  local todo, services, seen_sid, skipped = {}, {}, {}, {}
+  local service_panes = 0
   for bid, e in pairs(snap.panes) do
     local l = live[bid]
     if l then
       if e.kind == "services" then
-        if SHELLS[l.leaf.fg] and not seen_sid[l.sid] then -- service pane with nothing running
-          seen_sid[l.sid] = true
-          services[#services + 1] = l.sid
+        if M.config.services.action and M.pane_state(l.sid, bid) == "idle" then
+          service_panes = service_panes + 1
+          if not seen_sid[l.sid] then
+            seen_sid[l.sid] = true
+            services[#services + 1] = l.sid
+          end
         end
       elseif SHELLS[l.leaf.fg] and e.revive and #e.revive > 0 then
-        local cmd = M.hub_prefix(e) .. M.join(e.revive)
-        local line = e.cwd and (" cd " .. M.quote(e.cwd) .. " && " .. cmd) or (" " .. cmd)
-        todo[#todo + 1] = { bid = bid, sid = l.sid, e = e, line = line }
+        local argv, reason, label = e.revive
+        if e.kind == "labelled" then
+          label = e.label
+          local config = M.config.labelled[label]
+          if not config then reason = "labelled configuration removed"
+          else
+            argv = config.cmd
+            reason = M.labelled_running(label, matches, parents, views)
+          end
+        end
+        if reason then
+          skipped[#skipped + 1] = { bid = bid, label = e.label, reason = reason }
+        else
+          local cmd = M.hub_prefix(e) .. M.join(argv)
+          local line = e.cwd and (" cd " .. M.quote(e.cwd) .. " && " .. cmd) or (" " .. cmd)
+          todo[#todo + 1] = { bid = bid, sid = l.sid, e = e, line = line, labelled = label, argv = argv }
+        end
       end
     end
   end
   table.sort(todo, function(a, b)
+    if (a.labelled ~= nil) ~= (b.labelled ~= nil) then return a.labelled ~= nil end
     local ka = { a.e.session or "", a.e.window or "", a.bid }
     local kb = { b.e.session or "", b.e.window or "", b.bid }
     for i = 1, 3 do if ka[i] ~= kb[i] then return ka[i] < kb[i] end end
     return false
   end)
   table.sort(services)
-  return { todo = todo, services = services }
+  return { todo = todo, services = services, service_panes = service_panes, skipped = skipped }
 end
 
 -- ---- notice after a server restart ------------------------------------------------------------
@@ -1206,7 +1423,7 @@ function M.restart_notice_due(prev, cur, notified, cache)
 end
 
 function M.restart_message(n)
-  return string.format("%d %s can be brought back — press ⌘⇧B", n, n == 1 and "agent" or "agents")
+  return string.format("%d %s can be brought back — press ⌘⇧B", n, n == 1 and "pane" or "panes")
 end
 
 -- Show a macOS notification. REX_AGENTS_NOTIFY_CMD replaces osascript (tests); it gets TITLE TEXT.
@@ -1233,7 +1450,8 @@ function M.restart_notice(prev)
   if not M.restart_notice_due(prev, cur, okn and notified or nil) then
     return { count = 0, why = "not due (no server restart, or already sent for this server)" }
   end
-  local n = #M.revive_plan().todo
+  local plan = M.revive_plan()
+  local n = #plan.todo + plan.service_panes
   -- recorded before notifying: a failing notifier must not make every watcher restart try again
   M.write_json(M.paths.notified, { server = cur, saved_at = os.time(), count = n }, "600")
   if n == 0 then return { count = 0, why = "nothing to bring back" } end
@@ -1245,7 +1463,7 @@ end
 function M.revive_row(t)
   local e = t.e
   return string.format("%-14s %-16s %s%s%s", (e.session or ""):sub(1, 14), (e.window or ""):sub(1, 16),
-    M.join(e.revive):sub(1, 110), M.hub_prefix(e) ~= "" and ("  [" .. e.hub_name .. "]") or "",
+    M.join(t.argv or e.revive):sub(1, 110), M.hub_prefix(e) ~= "" and ("  [" .. e.hub_name .. "]") or "",
     e.note and ("  (" .. e.note .. ")") or "")
 end
 
@@ -1393,26 +1611,29 @@ function M.template_save(sid, name, window_id, v)
 end
 
 -- HUB(name) → the name to use (template_open makes taken names unique); nil = use as written.
-local function rex_layout(node, fresh, hub)
+local function rex_layout(node, fresh, hub, launches)
   if node.block then
     local b = node.block
     local opts = {}
     if b.cwd then opts.cwd = expand_home(b.cwd) end
     local cmd
     if fresh then cmd = b.cmd else cmd = b.resume or b.cmd end
+    local labelled = cmd and M.labelled_command(cmd)
     if cmd and b.hub_name then
       local n = hub and hub(b.hub_name) or b.hub_name
       if not M.hub_valid(n) then n = M.hub_slug(n) end
       if n ~= "" then cmd = "HUB_NAME=" .. n .. " " .. cmd end
     end
-    if cmd then opts.initial_input = b.hold and cmd or (cmd .. "\r") end -- hold: typed, not run
+    if launches then
+      launches[#launches + 1] = { cmd = cmd, labelled = labelled, hold = b.hold, label = b.label }
+    elseif cmd then opts.initial_input = b.hold and cmd or (cmd .. "\r") end -- hold: typed, not run
     local out = { flavor = SHELL_FLAVOR, options = opts }
     if b.label and b.label ~= "shell" then out.label = b.label end
     return { block = out }
   end
   local s = node.split
   return { split = { direction = s.direction, ratio = s.ratio or 0.5,
-    before = rex_layout(s.before, fresh, hub), after = rex_layout(s.after, fresh, hub) } }
+    before = rex_layout(s.before, fresh, hub, launches), after = rex_layout(s.after, fresh, hub, launches) } }
 end
 M.rex_layout = rex_layout
 
@@ -1450,12 +1671,26 @@ function M.template_open(name, fresh)
     taken[t] = true
     return t
   end
-  local wins = {}
-  for _, w in ipairs(tpl.windows or {}) do
-    wins[#wins + 1] = { window_label = w.label, layout = rex_layout(w.layout, fresh, hub) }
+  local wins, launches = {}, {}
+  for i, w in ipairs(tpl.windows or {}) do
+    launches[i] = {}
+    wins[#wins + 1] = { window_label = w.label, layout = rex_layout(w.layout, fresh, hub, launches[i]) }
   end
   local r, err = rex.call("session.create", { label = tpl.name, initial_windows = wins })
   if not r then error("session.create: " .. tostring(err), 0) end
+  r.messages = {}
+  -- Do not put guarded commands in initial_input: another copy may start while the session opens.
+  for _, labelled_first in ipairs({ true, false }) do
+    for i, list in ipairs(launches) do
+      for j, launch in ipairs(list) do
+        if launch.cmd and (launch.labelled ~= nil) == labelled_first then
+          local ok, detail = M.start_command(r.session_id, r.initial_windows[i].block_ids[j],
+            launch.cmd, launch.labelled, launch.hold)
+          if detail then r.messages[#r.messages + 1] = (launch.label or "pane") .. ": " .. (ok and "warning: " or "skipped: ") .. detail end
+        end
+      end
+    end
+  end
   return r
 end
 
@@ -1500,11 +1735,15 @@ function M.tab_to_session(sid, window_id, name)
     if n.block_id then
       local e = snap[n.block_id] or {}
       local cmd = (e.revive and e.kind ~= "services") and (M.hub_prefix(e) .. M.join(e.revive)) or nil
+      local labelled = cmd and M.labelled_command(cmd)
+      if e.kind == "labelled" and M.config.labelled[e.label] then
+        labelled, cmd = e.label, M.join(M.config.labelled[e.label].cmd)
+      end
       local opts = { cwd = n.cwd or HOME }
-      if cmd then opts.initial_input = cmd end
+      if cmd and not labelled then opts.initial_input = cmd end
       local b = { flavor = SHELL_FLAVOR, options = opts }
       if n.label and n.label ~= "shell" then b.label = n.label end
-      order[#order + 1] = { old = n.block_id, label = n.label, cmd = cmd }
+      order[#order + 1] = { old = n.block_id, label = n.label, cmd = cmd, labelled = labelled, staged = not labelled }
       return { block = b }
     end
     return { split = { direction = n.direction, ratio = n.ratio or 0.5, before = build(n.before), after = build(n.after) } }
@@ -1528,12 +1767,24 @@ function M.start_pending(name)
   if not s then error("no session named " .. tostring(name), 0) end
   local started, left = {}, {}
   for _, o in ipairs(pend[name] or {}) do
-    local _, err = block_call(s.session_id, "write", { block_id = o.new, data = "\r" })
-    if err then
-      o.error = tostring(err)
-      left[#left + 1] = o
+    o.labelled = o.labelled or M.labelled_command(o.cmd)
+  end
+  for _, labelled_first in ipairs({ true, false }) do
+    for _, o in ipairs(pend[name] or {}) do
+      if (o.labelled ~= nil) == labelled_first then
+        local ok, detail
+        if o.labelled and not M.config.labelled[o.labelled] then detail = "labelled configuration removed"
+        else
+          if o.labelled and o.staged == false then o.cmd = M.join(M.config.labelled[o.labelled].cmd) end
+          local text = o.staged == false and o.cmd or ""
+          ok, detail = M.start_command(s.session_id, o.new, text, o.labelled)
+        end
+        o.error, o.warning = nil, nil
+        if not ok then o.error = tostring(detail); left[#left + 1] = o
+        else o.warning = detail end
+        started[#started + 1] = o
+      end
     end
-    started[#started + 1] = o
   end
   pend[name] = (#left > 0) and left or nil -- keep the ones that failed for another try
   M.write_json(M.paths.pending, pend, "600")

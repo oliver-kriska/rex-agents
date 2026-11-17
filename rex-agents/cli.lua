@@ -95,6 +95,7 @@ local function cmd_revive(a)
   local pick, dry = flag(a, "--pick"), flag(a, "--dry-run") or flag(a, "--dry")
   if flag(a, "--save-first") then pcall(A.save) end
   local plan = A.revive_plan()
+  for _, s in ipairs(plan.skipped) do print("skipped: " .. tostring(s.label) .. ": " .. s.reason) end
   if #plan.todo == 0 and #plan.services == 0 then
     print("Nothing to bring back: every saved pane is running or gone.")
     return
@@ -115,20 +116,23 @@ local function cmd_revive(a)
     chosen = {}
     for _, l in ipairs(sel) do chosen[l:match("^([^\t]*)")] = true end
   end
-  for _, t in ipairs(plan.todo) do
+  local function start(t)
     if chosen[t.bid] then
-      local ok, err = A.type_if_idle(t.sid, t.bid, t.line)
+      local ok, err = A.start_command(t.sid, t.bid, t.line, t.labelled)
       if not ok then
         print("skipped: " .. (t.e.session or "") .. " / " .. (t.e.window or "") .. ": " .. tostring(err))
       else
-        print("started: " .. (t.e.session or "") .. " / " .. (t.e.window or "") .. " → " .. A.join(t.e.revive):sub(1, 80))
+        print("started: " .. (t.e.session or "") .. " / " .. (t.e.window or "") .. " → " .. A.join(t.argv):sub(1, 80))
+        if err then print("warning: " .. err) end
       end
     end
   end
+  for _, t in ipairs(plan.todo) do if t.labelled then start(t) end end
   for _, s in ipairs(plan.services) do
     local out, err = A.run_services(s)
     print("services: " .. tostring(out or err):sub(1, 200))
   end
+  for _, t in ipairs(plan.todo) do if not t.labelled then start(t) end end
 end
 
 local function cmd_template_save(a)
@@ -212,6 +216,7 @@ local function cmd_start_pending(a)
       print("failed " .. tostring(o.label) .. ": " .. o.error)
     else
       print("started " .. tostring(o.label) .. " → " .. o.cmd:sub(1, 90))
+      if o.warning then print("warning: " .. o.warning) end
     end
   end
 end
@@ -238,9 +243,9 @@ local function cmd_status(a)
     for _, r in ipairs(st.rows) do
       rows[#rows + 1] = { session = r.session, session_id = r.session_id, window = r.window, label = r.label,
         block_id = r.block_id, kind = r.kind, hub_name = r.hub_name, env_hub = r.env_hub, state = r.state,
-        pending = r.state == "restart pending" }
+        pending = r.state == "restart pending", reason = r.reason }
     end
-    print(A.encode({ panes = rows, saved_at = st.saved_at, watcher = st.watcher }))
+    print(A.encode({ panes = rows, saved_at = st.saved_at, watcher = st.watcher, warnings = st.warnings }))
     return
   end
   local function cut(s, n) s = tostring(s or ""); return #s > n and (s:sub(1, n - 1) .. "…") or s end
@@ -261,7 +266,8 @@ local function cmd_status(a)
     print(pending .. " running agent(s) have no HUB_NAME yet; they get it the next time rex-agents starts them"
       .. " (⌘⇧B after a Rex restart, or park → reopen).")
   end
-  if idle > 0 then print(idle .. " agent pane(s) are idle shells; ⌘⇧B brings them back.") end
+  if idle > 0 then print(idle .. " pane(s) are idle shells; ⌘⇧B brings them back.") end
+  for _, warning in ipairs(st.warnings) do print("warning: " .. warning) end
 end
 
 local function cmd_verify(a)

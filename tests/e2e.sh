@@ -20,6 +20,7 @@ URL="unix://$SOCK"
 # server, every client call and bin/rex-agents (through $T/bin/rex, first on PATH) all use it.
 REX=${REX_BIN:-$(command -v rex || echo "$HOME/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex")}
 SERVER_PID=
+EXTRA_PID=
 
 rx() { "$REX" --autostart=false -S "$URL" "$@"; }
 fail() { echo "FAIL: $*"; exit 1; }
@@ -33,13 +34,23 @@ stop_server() {
   fi
   SERVER_PID=
 }
-cleanup() { stop_server; rm -f "$SOCK"; rm -rf "$T"; }
+stop_extra() {
+  [ -n "$EXTRA_PID" ] || return 0
+  if ps -o comm= -p "$EXTRA_PID" | grep -Fq "$T/bin/hub-server"; then
+    kill -TERM "$EXTRA_PID"
+    wait "$EXTRA_PID" 2>/dev/null || true
+  fi
+  EXTRA_PID=
+}
+cleanup() { stop_extra; stop_server; rm -f "$SOCK"; rm -rf "$T"; }
 trap cleanup EXIT INT TERM
 
 # ---- environment: fakes first on PATH, private dirs, a zsh that reads none of your rc files
 mkdir -p "$T/bin" "$T/state" "$T/cfg" "$T/agents" "$T/templates" "$T/claude" "$T/amp/threads" "$T/zdot" "$T/w/dir with space" "$T/w/hub-live" "$T/w/plain"
 cc -O0 -o "$T/bin/claude" "$ROOT/tests/fake.c"
 cp "$T/bin/claude" "$T/bin/amp"
+cp "$T/bin/claude" "$T/bin/hub-server"
+cp "$T/bin/claude" "$T/bin/btop"
 ln -s "$REX" "$T/bin/rex"
 cat > "$T/zdot/.zshrc" <<EOF
 export PATH="$T/bin:\$PATH"
@@ -51,18 +62,20 @@ cat > "$T/cfg/init.lua" <<EOF
 require("rex-agents.actions"){ bin = "$ROOT/bin/rex-agents" }
 rex.action{ name = "e2e_services", title = "e2e services", run = function(ctx)
   local f = io.open("$T/services.txt", "a"); f:write(ctx.session_id, "\n"); f:close()
+  local e = io.open("$T/events.txt", "a"); e:write("services\n"); e:close()
 end }
 EOF
-cat > "$T/local.lua" <<'EOF'
+cat > "$T/local.lua" <<EOF
 return {
-  labelled = { hub = { cwd_suffix = "/hub-live", cmd = { "sleep", "86400" } } },
+  labelled = { hub = { cwd_suffix = "/hub-live", cmd = { "$T/bin/hub-server", "start", "two words", "$T/ready" },
+    ready = { path = "$T/ready", timeout = 5 } } },
   services = { labels = { iex = "iex -S mix phx.server" }, action = "e2e_services" },
 }
 EOF
 unset REX_SESSION REX_BLOCK REX_CLIENT
 export ZDOTDIR="$T/zdot" PATH="$T/bin:$PATH" REX_SERVER="$URL" REX_AGENTS_SERVER="$URL" \
   REX_AGENTS_STATE="$T/agents" REX_AGENTS_TEMPLATES="$T/templates" REX_AGENTS_CLAUDE_SESSIONS="$T/claude" \
-  REX_AGENTS_CONFIG="$T/local.lua" FAKE_AMP_DIR="$T/amp" REX_AGENTS_WATCH_LABEL=-
+  REX_AGENTS_CONFIG="$T/local.lua" FAKE_AMP_DIR="$T/amp" REX_AGENTS_WATCH_LABEL=- FAKE_EVENTS="$T/events.txt"
 RA="$ROOT/bin/rex-agents"
 
 start_server() {
@@ -97,7 +110,7 @@ assert(rex.call("session.create", { label = "Proj", initial_windows = {
   { window_label = "Agents", layout = h(
     v(b("mgr", W .. "/dir with space", "claude --dangerously-load-development-channels server:amp-bridge 'do the thing'"),
       v(b("amp", W .. "/plain", "amp"), b("runner", W .. "/plain", "amp --no-tui --runner-id r1"))),
-    v(v(b("hub", W .. "/hub-live", "sleep 86400"), b("iex", W .. "/plain", nil)),
+    v(v(b("hub", W .. "/hub-live", "$T/bin/hub-server start 'two words' $T/ready"), b("iex", W .. "/plain", nil)),
       v(b("restarted", W .. "/plain", "CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS='--model opus --add-dir /tmp' claude --resume 11111111-2222-3333-4444-555555555555"),
         v(b("plain", W .. "/plain", nil), b("oneshot", W .. "/plain", "amp -x 'one shot'"))))) } } }))
 assert(rex.call("session.create", { label = "Park Me", initial_windows = {
@@ -145,7 +158,7 @@ ok "hub names: session name, label, block id, collisions, env"
 st() { "$RA" status --json | jq -r --arg s "$1" --arg l "$2" '[.panes[] | select(.session == $s and .label == $l)][0].state'; }
 [ "$(st "Hub Names" envd)" = ok ] || fail "status: envd runs with its name"
 [ "$(st Proj mgr)" = "restart pending" ] || fail "status: mgr is restart pending"
-[ "$("$RA" status --json | jq '[.panes[]] | length')" = 10 ] || fail "status lists the 10 agent panes"
+[ "$("$RA" status --json | jq '[.panes[]] | length')" = 12 ] || fail "status lists agents, labelled and services"
 "$RA" status --json | jq -e '[.panes[] | select(.session_id == null or .block_id == null)] | length == 0' >/dev/null || fail "status rows carry session and block ids"
 "$RA" status | grep -q "running agent(s) have no HUB_NAME yet" || fail "status footer"
 "$RA" verify >/dev/null || { "$RA" verify; fail "verify after the first save"; }
@@ -154,6 +167,8 @@ ok "status: ok / restart pending; verify passes"
 # ---- (a) restart the server: panes come back as empty shells under the same block IDs
 OLD_SERVER=$(jq -r .server "$P")
 stop_server
+rm -f "$T/ready"
+: >"$T/events.txt"
 start_server
 
 # ---- the watcher's notice after the restart: one per server instance, none with notify = false
@@ -174,8 +189,8 @@ watch_once "$T/quiet.lua"
 [ ! -s "$T/notified.txt" ] || fail "notify = false: no notification"
 as_before_restart
 watch_once "$T/local.lua"
-[ "$(cat "$T/notified.txt")" = "rex-agents|11 agents can be brought back — press ⌘⇧B" ] || { cat "$T/notified.txt" "$T/watch.log"; fail "one notification after the restart"; }
-grep -q "restart notice: sent: 11 agents" "$T/watch.log" || fail "watcher logs the notice"
+[ "$(cat "$T/notified.txt")" = "rex-agents|12 panes can be brought back — press ⌘⇧B" ] || { cat "$T/notified.txt" "$T/watch.log"; fail "one notification after the restart, including services"; }
+grep -q "restart notice: sent: 12 panes" "$T/watch.log" || fail "watcher logs the notice"
 watch_once "$T/local.lua"
 as_before_restart # a watcher that restarts before its own save under the new server: notified.json says done
 watch_once "$T/local.lua"
@@ -197,6 +212,10 @@ bid_of() { rx block ls -s "$1" --json | jq -r --arg l "$2" '.blocks[] | select(.
 rx send -s Proj -b "$(bid_of Proj amp)" $'zsh\r'
 i=0; until [ "$(rx block ls -s Proj --json >/dev/null; pane Proj amp | grep -c 'e2e %')" -ge 2 ] || [ $i -ge 50 ]; do i=$((i + 1)); sleep 0.2; done
 "$RA" revive >"$T/revive0.txt"
+[ "$(head -2 "$T/events.txt")" = "$(printf 'hub-server\nservices')" ] || { cat "$T/events.txt"; fail "hub ready, then services, before agents"; }
+[ -e "$T/ready" ] || fail "hub readiness path was created"
+grep -q "timed out" "$T/revive0.txt" && fail "hub readiness must succeed, not time out"
+ok "revive order: waits for labelled readiness, then services, then agents"
 grep -q "^skipped: Proj / Agents: pane is busy" "$T/revive0.txt" || { cat "$T/revive0.txt"; fail "nested shell must be skipped"; }
 [ "$(grep -c '^started:' "$T/revive0.txt")" = 10 ] || { cat "$T/revive0.txt"; fail "expected 10 started next to the nested shell"; }
 rx send -s Proj -b "$(bid_of Proj amp)" $'exit\r'
@@ -225,7 +244,7 @@ names | diff - "$T/names1.json" >/dev/null || fail "hub names must survive the r
 ok "(b) revive: 10 + 1 commands typed into the right panes with their HUB_NAME, services action run"
 
 # ---- status after the revive: every agent runs with its name
-"$RA" status --json | jq -e '[.panes[] | select(.state != "ok")] | length == 0' >/dev/null \
+"$RA" status --json | jq -e '[.panes[] | select(.kind == "claude" or .kind == "amp" or .kind == "amp-runner") | select(.state != "ok")] | length == 0' >/dev/null \
   || { "$RA" status; fail "status after revive: all ok"; }
 # verify finds what the manual checks looked for
 mkdir -p "$T/bad"
@@ -331,5 +350,123 @@ wait_for Moved brk "argv: \[--model\] \[opus\] \[--resume\]"
 jq -e '.Moved == null' "$T/agents/pending.json" >/dev/null || fail "start-pending clears what it started"
 ok "tab-to-session + start-pending: typed into session.create blocks, then run"
 
-"$REX" --autostart=false -S "$URL" do "$ROOT/tests/unit.lua" | tail -1
+# ---- labelled guard on template-open and pending starts, including commands in unlabelled panes
+jq -n --arg cwd "$T/w/hub-live" --arg cmd "$T/bin/hub-server start 'two words' '$T/ready'" \
+  '{name:"Guard", windows:[{label:"Work", layout:{block:{label:"hub", cwd:$cwd, cmd:$cmd}}}]}' >"$T/templates/guard.json"
+"$RA" template-open guard >"$T/guard.txt"
+grep -q "already running (pid .*in Proj / hub" "$T/guard.txt" || { cat "$T/guard.txt"; fail "template guard reports existing Rex location"; }
+pane Guard hub | grep -q "hub-server" && fail "duplicate command must not even be staged"
+"$RA" save >/dev/null
+G=$(rx ls --json | jq -r '.sessions[] | select(.label == "Guard") | .session_id')
+GW=$(rx window ls -s "$G" --json | jq -r '.windows[0].window_id')
+"$RA" tab-to-session "$G" "$GW" PendingHub >/dev/null
+"$RA" start-pending PendingHub >"$T/pending.txt"
+grep -q "already running (pid" "$T/pending.txt" || { cat "$T/pending.txt"; fail "pending starts guard duplicates"; }
+pane PendingHub hub | grep -q "hub-server" && fail "pending duplicate command must not be typed"
+jq -e '.PendingHub | length == 1' "$T/agents/pending.json" >/dev/null || fail "skipped pending starts remain retryable"
+ok "labelled duplicate guard: template-open and start-pending leave panes untouched"
+
+# Move the test hub to an unlabelled pane on the private server.
+rx send -s Proj -b "$(bid_of Proj hub)" $'\003'
+sleep 0.5
+rx send -s Proj -b "$(bid_of Proj plain)" "$T/bin/hub-server start 'two words' '$T/ready' --extra"$'\r'
+wait_for Proj plain '^FAKE hub-server'
+"$RA" save >/dev/null
+jq -e '[.panes[] | select(.session == "Proj" and .label == "plain")] | length == 0' "$P" >/dev/null || fail "wrong-pane hub must not acquire a saved entry"
+"$RA" status --json >"$T/status.json"
+jq -e '.warnings | index("hub: runs in Proj/plain, not in its labelled pane") != null' "$T/status.json" >/dev/null || fail "status diagnoses wrong-pane hub"
+"$RA" verify >"$T/verify.txt"
+grep -q 'hub: runs in Proj/plain, not in its labelled pane' "$T/verify.txt" || fail "verify diagnoses wrong-pane hub"
+"$RA" revive --dry-run >"$T/plan.txt"
+grep -q '^skipped: hub: already running (pid .*in Proj / plain' "$T/plan.txt" || fail "revive excludes wrong-pane running hub"
+# The picker uses plan.todo; assert that it has no labelled row rather than drive interactive fzf.
+cat >"$T/plan.lua" <<EOF
+package.path = "$ROOT/?.lua;" .. package.path
+local A = require("rex-agents.core")
+for _, t in ipairs(A.revive_plan().todo) do assert(not t.labelled, "duplicate offered to picker") end
+EOF
+rx do "$T/plan.lua" >/dev/null
+ok "wrong-pane hub: reported by status/verify, excluded from revive picker, not saved there"
+
+# A process outside Rex still blocks a launch; a near-match argv must not block one.
+rx send -s Proj -b "$(bid_of Proj plain)" $'\003'
+sleep 0.5
+"$T/bin/hub-server" start 'two words' "$T/ready" --external >"$T/external.txt" &
+EXTRA_PID=$!
+sleep 0.2
+"$RA" start-pending PendingHub >"$T/pending.txt"
+grep -q "already running (pid $EXTRA_PID)" "$T/pending.txt" || { cat "$T/pending.txt"; fail "machine-wide duplicate detection"; }
+stop_extra
+"$T/bin/hub-server" starter 'two words' "$T/ready" >"$T/external.txt" &
+EXTRA_PID=$!
+sleep 0.2
+"$RA" start-pending PendingHub >"$T/pending.txt"
+grep -q '^started hub' "$T/pending.txt" || { cat "$T/pending.txt"; fail "different whole argv word must not match"; }
+wait_for PendingHub hub '^FAKE hub-server'
+jq -e '.PendingHub == null' "$T/agents/pending.json" >/dev/null || fail "successful pending launch clears retry"
+stop_extra
+ok "machine-wide guard: matches extra argv, rejects partial argument matches, retries safely"
+
+# Stale saved commands are warnings; revive plans use current config, never the stale argv.
+rx send -s PendingHub -b "$(bid_of PendingHub hub)" $'\003'
+sleep 0.5
+"$RA" save >/dev/null
+jq '(.panes[] | select(.kind == "labelled")).revive = ["obsolete-hub", "start"]' "$P" >"$T/p.json" && mv "$T/p.json" "$P"
+"$RA" verify >"$T/verify.txt"
+grep -q 'saved revive differs from current config cmd' "$T/verify.txt" || fail "verify stale labelled cmd"
+"$RA" revive --dry-run >"$T/plan.txt"
+grep -q 'obsolete-hub' "$T/plan.txt" && fail "stale labelled command offered for revive"
+grep -q 'hub-server start' "$T/plan.txt" || fail "current labelled config not offered"
+sed 's/labelled = {/labelled = { absent = { cmd = { "e2e-absent-program" } },/' "$T/local.lua" >"$T/absent.lua"
+REX_AGENTS_CONFIG="$T/absent.lua" "$RA" verify >"$T/verify.txt"
+grep -q 'absent: configuration matches no pane' "$T/verify.txt" || fail "verify orphan configuration"
+"$RA" revive >"$T/multi-revive.txt"
+[ "$(grep -c '^started:' "$T/multi-revive.txt")" -eq 1 ] || { cat "$T/multi-revive.txt"; fail "multiple saved hub panes must start just one program"; }
+wait_for Guard hub '^FAKE hub-server'
+grep -q 'already running (pid' "$T/multi-revive.txt" || fail "revive must recheck after the first labelled launch"
+rx send -s Guard -b "$(bid_of Guard hub)" $'\003'
+sleep 0.5
+ok "verify: stale labelled commands and unmatched configuration; revive uses current command"
+
+# A readiness timeout warns and continues to the next program; hold still only stages text.
+sed "s@ready = { path = \"$T/ready\", timeout = 5 }@ready = { path = \"$T/never-ready\", timeout = 1 }@" "$T/local.lua" >"$T/timeout.lua"
+jq --arg cwd "$T/w/plain" '.name = "Timeout" | .windows[0].layout = {split:{direction:"horizontal", before:.windows[0].layout,
+  after:{split:{direction:"vertical", before:{block:{label:"viewer",cwd:$cwd,cmd:"btop"}},after:{block:{label:"held",cwd:$cwd,cmd:"echo HELD",hold:true}}}}}}' \
+  "$T/templates/guard.json" >"$T/templates/timeout.json"
+REX_AGENTS_CONFIG="$T/timeout.lua" "$RA" template-open timeout >"$T/timeout.txt"
+grep -q 'readiness timed out.*continuing' "$T/timeout.txt" || { cat "$T/timeout.txt"; fail "readiness timeout reported"; }
+wait_for Timeout viewer '^FAKE btop'
+wait_for Timeout held 'echo HELD'
+pane Timeout held | grep -q '^HELD$' && fail "held command must not run"
+"$RA" save >/dev/null
+"$RA" status --json >"$T/status.json"
+jq -e '[.panes[] | select(.session == "Timeout" and .label == "viewer")][0] | .kind == "btop" and .state == "running"' "$T/status.json" >/dev/null || fail "viewer status"
+jq '(.panes[] | select(.session == "Proj" and .label == "mgr")) |= (del(.revive) | .note = "no session ID found")' "$P" >"$T/bad/panes.json"
+# The pane is stopped only in the private fixture so status must use its saved unresumable entry.
+rx send -s Proj -b "$(bid_of Proj mgr)" $'\003'
+sleep 0.5
+REX_AGENTS_STATE="$T/bad" "$RA" status --json >"$T/status.json"
+jq -e '[.panes[] | select(.session == "Proj" and .label == "mgr")][0].state == "cannot resume: no session ID found"' "$T/status.json" >/dev/null || fail "unresumable reason"
+jq -e '[.panes[] | select(.state == "pane missing")] | length > 0' "$T/status.json" >/dev/null || fail "missing saved panes included"
+ok "readiness timeout continues; held commands stay staged; status includes viewers, missing and unresumable panes"
+
+# Two clients can open different templates together, but must not launch two copies of the hub.
+rx send -s Timeout -b "$(bid_of Timeout hub)" $'\003'
+sleep 0.5
+jq '.name = "ConcurrentA"' "$T/templates/guard.json" >"$T/templates/concurrent-a.json"
+jq '.name = "ConcurrentB"' "$T/templates/guard.json" >"$T/templates/concurrent-b.json"
+BEFORE=$(grep -c '^hub-server$' "$T/events.txt")
+"$RA" template-open concurrent-a >"$T/a.txt" &
+A_PID=$!
+"$RA" template-open concurrent-b >"$T/b.txt" &
+B_PID=$!
+wait "$A_PID"
+wait "$B_PID"
+sleep 2.5
+[ "$(grep -c '^hub-server$' "$T/events.txt")" -eq "$((BEFORE + 1))" ] || { cat "$T/a.txt" "$T/b.txt"; fail "concurrent clients started duplicate hubs"; }
+cat "$T/a.txt" "$T/b.txt" | grep -Eq 'already running|labelled launch locked' || fail "concurrent loser explains the skip"
+ok "concurrent template clients start exactly one labelled program"
+
+"$REX" --autostart=false -S "$URL" do "$ROOT/tests/unit.lua" >"$T/unit.txt" || { cat "$T/unit.txt"; fail "unit tests"; }
+tail -1 "$T/unit.txt"
 echo "all e2e checks passed"

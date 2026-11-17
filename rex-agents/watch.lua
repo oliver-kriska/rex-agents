@@ -7,7 +7,7 @@
 -- It saves once at start, every INTERVAL seconds, and SOON seconds after a pane starts a
 -- program, so a freshly started agent is on disk before the next server restart.
 -- After a server restart, the first save under the new server is followed by one notification
--- ("N agents can be brought back — press ⌘⇧B"); it never types into panes.
+-- ("N panes can be brought back — press ⌘⇧B"); it never types into panes.
 
 local here = debug.getinfo(1, "S").source:match("^@?(.*)/[^/]+$") or "."
 package.path = here .. "/../?.lua;" .. here .. "/?.lua;" .. package.path

@@ -126,6 +126,13 @@ check("claude flags dedupe", A.claude_flags({ "--resume", "id", "--model", "m", 
 check("leading object", A.leading_json_object('{"a":"x}","b":{"c":1}}}\n'), '{"a":"x}","b":{"c":1}}')
 check("leading object escaped quote", A.leading_json_object('{"a":"\\"}"}x'), '{"a":"\\"}"}')
 check("leading object none", A.leading_json_object("nope"), nil)
+local nested = [[{"outer":{"text":"{a} and \"}\\{\"","array":[{"s":"}"}]}}]]
+check("leading object nested strings and braces", A.leading_json_object(nested .. "}junk"), nested)
+check("labelled argv prefix", A.argv_prefix({ "/bin/hub", "start", "two words", "--debug" }, { "/bin/hub", "start", "two words" }), true)
+check("labelled argv words stay whole", A.argv_prefix({ "/bin/hub", "start", "two", "words" }, { "/bin/hub", "start", "two words" }), false)
+check("labelled argv argument prefix is not enough", A.argv_prefix({ "hub", "starter" }, { "hub", "start" }), false)
+check("labelled bare executable", A.argv_prefix({ "/bin/hub", "start" }, { "hub", "start" }), true)
+check("labelled absolute executable", A.argv_prefix({ "/other/hub", "start" }, { "/bin/hub", "start" }), false)
 -- names.json: only running agents with a valid name, with their pids
 local nd = A.names_doc({
   b1 = { kind = "claude", hub_name = "mgr", session = "S", session_id = "s1" },
@@ -140,11 +147,14 @@ check("names skips non-agents and not running", { nd.blocks.b2 == nil, nd.blocks
 -- save: skipped when the server changes during the scan; legacy alive_on ("PID@lstart") still
 -- counts as the running server. Uses stubs, a scratch state dir, no Rex calls.
 do
-  local tmp = (os.getenv("TMPDIR") or "/tmp"):gsub("/$", "") .. "/rex-agents-unit-" .. os.time()
-  A.exec({ "mkdir", "-p", tmp })
-  local saved = { snap = A.paths.snap, prev = A.paths.prev, snapshot = A.snapshot, server_id = A.server_id,
+  local base = (os.getenv("TMPDIR") or "/tmp"):gsub("/$", "") .. "/rex-agents-unit.XXXXXX"
+  local made = assert(A.exec({ "mktemp", "-d", base }))
+  assert(made.ok, "unit temp directory")
+  local tmp = made.stdout:gsub("%s+$", "")
+  local saved = { snap = A.paths.snap, prev = A.paths.prev, names = A.paths.names, snapshot = A.snapshot, server_id = A.server_id,
     legacy = A.legacy_server_id }
   A.paths.snap, A.paths.prev = tmp .. "/panes.json", tmp .. "/panes.prev.json"
+  A.paths.names = tmp .. "/names.json"
   local function idle_view()
     return { { session_id = "s", label = "S", windows = { { label = "W", layout = { block_id = "b1", fg = "zsh" } } } } }
   end
@@ -178,6 +188,7 @@ do
   check("same_server nil", A.same_server(nil, "x", {}), false)
 
   A.paths.snap, A.paths.prev = saved.snap, saved.prev
+  A.paths.names = saved.names
   A.snapshot, A.server_id, A.legacy_server_id = saved.snapshot, saved.server_id, saved.legacy
   A.exec({ "rm", "-rf", tmp })
 end
@@ -189,8 +200,8 @@ check("notice: already sent for this server", A.restart_notice_due("inst-A", "in
 check("notice: sent for an older server", A.restart_notice_due("inst-A", "inst-B", { server = "inst-A" }), true)
 check("notice: no earlier save", A.restart_notice_due(nil, "inst-B", nil), false)
 check("notice: server not answering", A.restart_notice_due("inst-A", nil, nil), false)
-check("notice text", A.restart_message(3), "3 agents can be brought back — press ⌘⇧B")
-check("notice text one", A.restart_message(1), "1 agent can be brought back — press ⌘⇧B")
+check("notice text", A.restart_message(3), "3 panes can be brought back — press ⌘⇧B")
+check("notice text one", A.restart_message(1), "1 pane can be brought back — press ⌘⇧B")
 
 -- re-encode real templates for a byte diff against the originals
 if rex.args.templates then

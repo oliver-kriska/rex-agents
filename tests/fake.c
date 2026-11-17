@@ -18,6 +18,16 @@ int main(int argc, char **argv) {
   for (int i = 1; i < argc; i++) printf(" [%s]", argv[i]);
   printf("\n");
   printf("hub=%s\n", getenv("HUB_NAME") ? getenv("HUB_NAME") : "-");
+  if (strcmp(prog, "hub-server") == 0 && argc > 3) {
+    sleep(2); // a foreground process exists before its readiness path does
+    close(open(argv[3], O_CREAT | O_WRONLY, 0600));
+  }
+  const char *events = getenv("FAKE_EVENTS");
+  if (events) {
+    int fd = open(events, O_CREAT | O_WRONLY | O_APPEND, 0600);
+    dprintf(fd, "%s\n", prog);
+    close(fd);
+  }
   if (strcmp(prog, "claude") == 0 && getenv("FAKE_RELAUNCH")) {
     // like Claude Code after /restart or an update: this process stays, the session runs in a child
     unsetenv("FAKE_RELAUNCH");

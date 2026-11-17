@@ -62,8 +62,8 @@ rex-agents status [--json]
 rex-agents verify [--against FILE]
 ```
 
-`status` lists every agent pane with its hub name (see below) and whether the running program
-already has it:
+`status` lists agents, labelled programs, service panes and viewers, including saved panes that
+are missing or cannot be resumed. Agents also show their hub name (see below):
 
 | State | Meaning |
 | --- | --- |
@@ -72,18 +72,38 @@ already has it:
 | `runs as NAME` | runs with another `HUB_NAME`, set by hand |
 | `not saved yet` | started since the last save (the watcher saves within 20 s) |
 | `not running` | an idle shell after a restart; ⌘⇧B brings it back |
+| `running` | a service or viewer is running |
+| `already running (pid N, in SESSION / PANE)` | the configured labelled command runs here or elsewhere; it will not be started again |
+| `busy (different program)` / `pane is busy` | the pane cannot safely receive a command |
+| `cannot resume: REASON` | no resume command, removed labelled config, or missing service action |
+| `pane missing` | the saved pane no longer exists |
 
-`--json` gives the same rows with session and block IDs. `verify` checks `panes.json` (entries
+`--json` gives the same rows with session and block IDs, reasons and warnings. Both `status` and
+`verify` warn about labelled programs running in the wrong pane, configured labels matching no
+pane, and saved labelled commands differing from current config. Reporting a program elsewhere
+does not save it under that other pane. `verify` checks `panes.json` (entries
 have a command, no duplicate names among live panes, no leftover helper fields), the watcher
 and the time of the last save, and exits 1 on a problem. With `--against`, a copy of
 `panes.json` taken before a change, it also lists entries that went missing and commands that
 changed; a pane you closed or a program you exited is only a warning, and a pane that became
 resumable is reported as such. A live agent that can't be resumed is a warning naming the pane.
 
-Revive only types into a pane whose foreground program is a shell at its prompt, so it never
-starts anything twice. It checks each pane again right before typing (the picker may have been
+Revive only types into a pane whose foreground program is a shell at its prompt.
+It checks each pane again right before typing (the picker may have been
 open a while), waits up to 10 s for a pane whose shell is still starting, and skips a pane that
 runs a shell inside another shell.
+
+Labelled programs start first, then service actions, then agents and viewers. A labelled entry
+can set `ready = { path = "~/Library/Application Support/my-hub/hub.sock", timeout = 30 }`:
+rex-agents waits for that path (including sockets) before proceeding. A timeout warns and
+continues; an already-running program is treated as ready immediately.
+
+Before launching a labelled program, rex-agents checks machine-wide process argv for the
+configured command as a whole-argument prefix (extra trailing flags are allowed). Existing
+copies are omitted from the picker and reported with their PID and, when visible on this Rex
+server, session/pane. Revive uses the **current config command**, never a stale saved one.
+Template-open and start-pending apply the same guard when their complete command matches a
+labelled entry. Newly moved labelled commands stay unstaged until start-pending checks them.
 
 ## How it works
 
@@ -124,10 +144,11 @@ connection drops, it exits and launchd starts it again.
 
 **Notice after a restart.** When the watcher's first save runs under a new server (Rex's
 `instance_id` differs from the one in the previous save), it works out what ⌘⇧B would bring back
-and, if anything, shows one macOS notification: *rex-agents: N agents can be brought back — press
+and, if anything, shows one macOS notification: *rex-agents: N panes can be brought back — press
 ⌘⇧B*. It never types into a pane. The server it notified for is kept in `notified.json`, so a
 watcher that launchd restarts doesn't repeat it. `notify = false` in the settings turns it off. A
-pane whose shell is still starting during that save isn't counted.
+pane whose shell is still starting during that save isn't counted. Service panes count too;
+labelled commands already running elsewhere do not.
 
 ## Agent names (`HUB_NAME`)
 
@@ -208,7 +229,8 @@ inside that pane doesn't take it) and the file is recent (saves happen every 2 m
 ## Settings
 
 `~/.config/rex/rex-agents.local.lua` returns a table (see `examples/rex-agents.local.lua`):
-extra `viewers`, `labelled` panes (`label` + `cwd_suffix` → `cmd`), service panes (`services.labels`
+extra `viewers`, `labelled` panes (`label` + `cwd_suffix` → `cmd`, optional `ready.path` and
+`ready.timeout` in seconds, default 30), service panes (`services.labels`
 and the init.lua `services.action` to run), `keep_missing`, and `notify = false` to turn off the
 notice after a restart.
 
@@ -226,6 +248,16 @@ Environment overrides, mainly for tests: `REX_AGENTS_STATE`, `REX_AGENTS_TEMPLAT
   therefore always passes `-S` (the pane's own `REX_SERVER`, or `REX_AGENTS_SERVER`), and
   `tests/e2e.sh` does the same.
 - Nothing here stops or restarts a Rex server.
+- The duplicate guard reads exact argv, not shell aliases or arbitrary command compositions.
+  An unreadable candidate that still exists stops the check rather than allowing a duplicate.
+  It cannot identify a program that replaces itself with unrelated argv. Configure the
+  long-running executable, not a short-lived launcher.
+  External/manual starts can race the check; the program itself must enforce a strict singleton.
+- Labelled launches sharing a state directory are serialized with `labelled-start.lock`. A
+  crash or launch not observed within 10 seconds leaves the lock intact to prevent another
+  launch. Inspect the program and pane before removing that empty directory and retrying.
+  Separate state directories do not share this lock. Service actions remain user-owned code;
+  they must avoid launching duplicates themselves.
 
 ## Tests
 

@@ -6,9 +6,14 @@ return {
   viewers = { "ngrok" },
 
   -- Panes recognised by their label and the end of their working directory, restarted with a
-  -- fixed command whatever was running in them.
+  -- fixed command whatever was running in them. Existing matching processes anywhere on the
+  -- machine prevent another launch, even when running in an unlabelled pane.
   labelled = {
     -- api = { cwd_suffix = "/my-app", cmd = { "mix", "phx.server" } },
+    -- hub = { cwd_suffix = "/my-hub", cmd = { "/usr/local/bin/my-hub", "start" },
+    --   ready = { path = "~/Library/Application Support/my-hub/hub.sock", timeout = 30 } },
+    -- Optional readiness: wait for the path before agents start. Timeout warns and continues;
+    -- an already-running program is considered ready without waiting. Default timeout: 30 s.
   },
 
   -- Service panes recognised by label. When one of them is an idle shell after a restart,
