@@ -119,8 +119,21 @@ rex-agents verify
 rex-agents verify --against /path/to/panes.before-install.json
 ```
 
-Claude Code resumes with its launch flags and `--resume SESSION_ID`. Amp resumes with
-`amp threads continue THREAD_ID`; `--no-tui` runners keep their own arguments.
+Recognised agent modes:
+
+| Kind | Restore behavior |
+| --- | --- |
+| `claude` | `claude` with supported launch flags and `--resume SESSION_ID`; unavailable if no session ID is found. |
+| `amp` | `amp threads continue THREAD_ID`; if no thread is found, starts plain `amp` with a warning in the picker. Original interactive launch flags are not preserved. |
+| `amp-runner` | `amp --no-tui …` with its recorded arguments. |
+| `amp-orb` | `amp orb provider …` with its recorded arguments; no generated hub name. |
+
+Amp `-x` / `--execute` jobs are excluded. Claude Code is recognised by executable basename
+`claude`; its prompt and conversation-selector flags are removed before adding the saved ID.
+The flag parser supports known value-taking options, not every future Claude option. Claude
+print-mode processes are not separately excluded, but `-p` / `--print` is removed on restore.
+Other agents, including Codex, have no built-in conversation-resume support. Configuring one
+as a viewer only replays a command; it does not add session-ID discovery.
 
 `status` covers agents and every configured pane kind, including missing panes and reasons a
 pane cannot resume. States include `running`, `not running`, `busy (different program)`,
@@ -133,10 +146,12 @@ of every unconfigured program on the machine.
 
 ### Restart notification
 
-After a restart, one macOS notification says **“N panes can be brought back — press ⌘⇧B”**.
+After a restart, if the first successful save produces a nonempty revive plan, one macOS
+notification says **“N panes can be brought back — press ⌘⇧B”**.
 `notify = false` in local settings disables it. The watcher remembers the notified server in
 `notified.json`, so restarting just the watcher does not repeat it. Panes still starting at the
 first save are not counted, and labelled programs already running elsewhere are excluded.
+The count is a plan, not a guarantee: each direct launch rechecks the pane and can still skip it.
 
 ## Optional features
 
@@ -209,9 +224,10 @@ Your action must check its own pane safety and prevent duplicate services.
 viewers = { "btop", "lazygit" },
 ```
 
-Viewer entries match the executable basename and resume with the recorded argv. The list is
-empty by default. They receive no generated `HUB_NAME`. Programs not recognised as agents,
-viewers, labelled programs or services are not recorded for revival.
+Viewer entries match the executable basename and replay that basename plus the recorded
+arguments, resolving the executable through PATH rather than retaining its original absolute
+path. The list is empty by default. They receive no generated `HUB_NAME`. Programs not
+recognised as agents, viewers, labelled programs or services are not recorded for revival.
 
 ### Hub names (opt-in)
 
@@ -221,10 +237,13 @@ Add this one line inside the local settings table to enable agent names:
 hub = true,
 ```
 
-When enabled, commands started by revive, template-open and start-pending receive
-`HUB_NAME=<name>`. Names persist in `panes.json` and templates and are unique among live panes.
-Priority: an existing `HUB_NAME`, a user-set Claude Code session name, a non-generic pane
-label, then `<session>-<kind>-<last 6 block ID characters>`. Collisions add the session name.
+When enabled, Claude Code, interactive Amp and Amp runner commands started by revive,
+template-open and start-pending receive `HUB_NAME=<name>`. Saves assign unique names among
+live agent panes on the inspected server; they do not coordinate names across Rex servers.
+Priority: a valid, unique existing `HUB_NAME`, the name previously saved for that pane, a
+user-set Claude Code session name, a non-generic pane label, then
+`<session>-<kind>-<last 6 block ID characters>`. Collisions try a session prefix, then a
+generated name or numeric suffix. Renaming a conversation does not replace an already-saved name.
 Names use `[A-Za-z0-9][A-Za-z0-9._-]*` and have at most 64 characters.
 
 Status then adds a hub column: `ok` means the environment matches, `restart pending` means
@@ -245,8 +264,9 @@ Every enabled save writes a private (mode 600), atomic `~/.local/state/rex-agent
 }
 ```
 
-Only running agents are listed. `pids` includes the pane's foreground process and the
-relaunched Claude Code child. Version 1 is unchanged for chief v0.1.0-pre.9 clients.
+Only running Claude Code, interactive Amp and Amp runner panes are listed. `pids` includes
+the pane's foreground process and, when discovered, the relaunched Claude Code descendant
+(searched up to two levels down). Version 1 is unchanged for chief v0.1.0-pre.9 clients.
 Turning hub integration off removes this map on the next successful save and stops generated
 prefixes, hub metadata, columns and validation. Explicit commands and inherited environments
 remain user-controlled; rex-agents does not strip a manually supplied `HUB_NAME`.
@@ -255,8 +275,12 @@ remain user-controlled; rex-agents does not strip a manually supplied `HUB_NAME`
 `--as`, `HUB_NAME`, then `blocks[$REX_BLOCK]` in names.json. They refuse the file unless it is
 a plain user-owned file with no group/other mode bits, version 1, saved within 10 minutes and
 no more than 1 minute in the future. A listed PID must be a client ancestor; all intervening
-processes must be shells or launchers. Each refusal prints a one-line reason. This lookup
-reads only names.json plus one `ps`.
+processes must be shells or launchers. Refusals include a one-line reason. Without a usable
+name, `hub mcp` fails; ordinary CLI commands fall back to `cli-$USER` (quietly if no map exists).
+This lookup checks file metadata, parses names.json, obtains the current UID with `id -u`,
+and uses at most one `ps` ancestry snapshot; it makes no Rex API call. It also rejects files
+over 1 MB, files changed during the read and invalid names. The pre.9 client reads the default
+`~/.local/state/rex-agents/names.json` path, not rex-agents' state-directory overrides.
 
 ### Project templates and parking
 
@@ -293,10 +317,13 @@ rex-agents start-pending NAME
 ```
 
 `template-save` records the current layout and commands without closing anything. Omit `NAME`
-to use the session name (or the tab name with `--window`); filenames are lowercase slugs.
+to use the session name (or the tab name with `--window`; a default tab name falls back to a
+pane's cwd basename); filenames are lowercase slugs.
 `template-open NAME` uses saved `resume` commands when present; `--fresh` uses `cmd` instead.
 It refuses to create another session with the template's name. Labelled commands start first;
-other template commands follow in layout order.
+other template commands follow in layout order. Creating the session does not select it in
+the Rex app: switch to it with ⌘K. The picker offers “continue” only when a template has at
+least one `resume` command; otherwise choose “fresh,” including for a parked viewer-only session.
 
 `park` saves first, then asks whether to close the session (default **No**). Its busy warning
 covers detected Claude Code turns, not every possible background job. Closing ends the programs;
@@ -306,7 +333,11 @@ only conversations with working resume commands can continue later.
 non-service commands without pressing Enter; guarded labelled commands are deferred entirely.
 Inspect the new session, close the old tab yourself, then run `start-pending NAME`. That starts
 labelled commands first and keeps failed entries for retry. Service panes need their own action
-or manual startup. The old tab is never closed by `tab-to-session`.
+or manual startup. The old tab is never closed by `tab-to-session`. Run `save` immediately before
+copying: commands come from the last snapshot, not a new scan. With hub enabled, copied commands
+retain the old names; do not start both copies. Unlike template-open, this path does not assign
+new names to avoid collisions. Do not edit staged text before `start-pending`: it presses Enter
+on the existing input of non-labelled panes, rather than retyping the saved command.
 
 ## Configuration reference
 
@@ -388,7 +419,9 @@ and `WINDOW_ID` below refer to Rex IDs; `NAME` is a template or destination sess
 
 `core.lua` classifies, saves and restores panes; `cli.lua` exposes commands; `actions.lua`
 registers keys; `watch.lua` saves at startup, every two minutes and 20 seconds after process
-changes. `procargs.js` reads exact argv via macOS sysctl using osascript's JavaScript bridge.
+changes, block creation or session creation. Bursts share a save 20 seconds after the first
+event; later events do not reset that timer. `procargs.js` reads exact argv via macOS sysctl
+using osascript's JavaScript bridge.
 Claude session IDs come from `~/.claude/sessions/<pid>.json`, including relaunched children;
 launch flags come from argv or `CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS`. Only that variable
 and (with hub enabled) `HUB_NAME` are read from process environments. Amp thread IDs come from
@@ -448,6 +481,9 @@ launchd inspection), and `REX_AGENTS_NOTIFY_CMD` (called as `CMD TITLE TEXT`). H
 
 **⌘⇧B does nothing.** Reload Rex config after setup. Check for conflicting key bindings or
 use the palette action. Make sure `fzf` is on PATH for the picker.
+
+**Help fails outside Rex.** All commands except `setup`, including ordinary `--help`, run
+through `rex do` and need a reachable Rex server. `rex-agents setup --help` works without one.
 
 **“Nothing to bring back.”** Run `status` and `revive --dry-run`. The pane may already be
 running, missing, unrecognised, or have no saved resume command. A shell that went idle before

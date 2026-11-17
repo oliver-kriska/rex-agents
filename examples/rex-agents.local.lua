@@ -7,14 +7,16 @@ return {
   -- Additional shell names (extends zsh, -zsh, bash, -bash, sh, fish, login).
   -- shells = { "my-shell" },
 
-  -- Programs restarted with the same arguments after a server restart (empty by default).
+  -- Programs restarted by basename on PATH with their saved arguments (empty by default).
+  -- This replays commands; it does not discover conversation IDs for unsupported agents.
   viewers = {
     -- "glow", "btop", "htop", "lazygit", "ngrok",
   },
 
   -- Panes recognised by their label and the end of their working directory, restarted with a
-  -- fixed command whatever was running in them. Existing matching processes anywhere on the
-  -- machine prevent another launch, even when running in an unlabelled pane.
+  -- fixed command once the pane is idle. Existing matching processes anywhere on the machine
+  -- prevent another launch, even when running in an unlabelled pane. This is a best-effort
+  -- duplicate check, not singleton enforcement; use running.socket for runtime wrappers.
   labelled = {
     -- api = { cwd_suffix = "/my-app", cmd = { "mix", "phx.server" } },
     -- hub = { cwd_suffix = "/my-hub", cmd = { "/usr/local/bin/my-hub", "start" },
@@ -31,6 +33,8 @@ return {
   -- revive runs the init.lua action named here once for that session
   -- (`rex do -s SESSION <action>`). In templates, each label gets the command given, or the
   -- running program's own arguments when the value is `true`.
+  -- Service actions are not picker rows: they run after accepting the command selection,
+  -- or immediately if only services are eligible. The action must check its own pane safety.
   services = {
     labels = {
       -- server = "mix phx.server",

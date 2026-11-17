@@ -4,9 +4,11 @@
 
 First public release of rex-agents, a macOS Lua extension for Rex.
 
-- Record Claude Code session IDs and launch flags, including relaunched children; resume Amp
-  threads and preserve non-TUI runner arguments after a Rex server restart.
-- Restore selected commands with ⌘⇧B and show one opt-out notification per server restart.
+- Record Claude Code session IDs and supported launch flags, including relaunched children;
+  resume Amp threads (or start plain Amp when no thread is found), and preserve non-TUI runner
+  and orb-provider arguments after a Rex server restart.
+- Restore selected commands with ⌘⇧B and show an opt-out notification when the first
+  successful save after a server restart finds panes to bring back.
 - Save project layouts as templates, open fresh or continued conversations, park sessions,
   and copy tabs into sessions with commands staged for later startup.
 - Configure viewers, labelled programs and per-session service actions. Start labelled

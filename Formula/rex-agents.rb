@@ -2,7 +2,6 @@ class RexAgents < Formula
   desc "Restore coding agents and project layouts after a Rex restart"
   homepage "https://github.com/oliver-kriska/rex-agents"
   url "https://github.com/oliver-kriska/rex-agents/archive/refs/tags/v0.1.0.tar.gz"
-  # RELEASE BLOCKER: replace with the downloaded v0.1.0 tarball's SHA-256 before stable installation.
   sha256 "b799cb52a044e4c51af4f6c04f23c773e051cb57d4c56dcf8d734dbea711e466"
   license "MIT"
   head "https://github.com/oliver-kriska/rex-agents.git", branch: "main"
@@ -24,6 +23,7 @@ class RexAgents < Formula
       Reload Rex config to activate Command-Shift-B. Hub integration is off by default.
       Before uninstalling the formula, run: rex-agents setup --uninstall
       Setup links use the stable opt path and survive brew upgrade.
+      After upgrading, rerun setup to restart the watcher with the new code, then reload Rex config.
     EOS
   end
 

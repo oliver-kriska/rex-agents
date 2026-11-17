@@ -1,8 +1,8 @@
 # Releasing rex-agents
 
 The repository is both source code and a Homebrew tap. A release tag selects the source
-archive; the formula on `main` supplies its checksum. For v0.1.0 the formula already names
-the tag, but its all-zero SHA-256 is a **release blocker**, not a usable checksum.
+archive; the formula on `main` supplies its checksum. v0.1.0 is released and its checksum
+is pinned. Follow this procedure for a new version; never recreate the v0.1.0 tag.
 
 These are maintainer steps, not an automatic release script. Tags, pushes, releases and
 installation require the maintainer's approval. Do not run setup or tests against a live Rex
@@ -15,37 +15,41 @@ session as part of packaging validation.
   Confirm each binary with its `version` command first.
 - Wait for the candidate's GitHub Actions run to pass. E2e is local-only; CI does not install Rex.
 - Review the changelog and the release diff for private paths, state files and credentials.
-- For later releases, update the formula URL and changelog version before tagging.
+- Choose an unused version and update the changelog with its release date. Set `VERSION`
+  below to that version without the leading `v` (the example is not a release decision).
+- Keep the published formula on the previous working release until the new tarball exists.
+  Update its URL and checksum together in step 3, rather than publishing an unusable placeholder.
 
 ## 2. Tag the reviewed source
 
 From a clean checkout of the reviewed commit:
 
 ```sh
-git tag -a v0.1.0 -m 'rex-agents v0.1.0'
-git push origin v0.1.0
+VERSION=0.1.1 # replace with the reviewed, unused version
+git tag -a "v$VERSION" -m "rex-agents v$VERSION"
+git push origin "v$VERSION"
 ```
 
-Do not move an existing published tag. The tagged formula may contain the checksum placeholder;
-the formula that users install comes from the tap's `main` branch, updated in the next step.
+Do not move an existing published tag. The tagged source still contains the previous formula;
+the formula users install comes from the tap's `main` branch, updated in the next step.
 
 ## 3. Hash the actual GitHub tarball
 
 ```sh
-archive=$(mktemp -t rex-agents-v0.1.0)
+archive=$(mktemp -t "rex-agents-v$VERSION")
 curl --fail --location --retry 3 \
-  https://github.com/oliver-kriska/rex-agents/archive/refs/tags/v0.1.0.tar.gz \
+  "https://github.com/oliver-kriska/rex-agents/archive/refs/tags/v$VERSION.tar.gz" \
   --output "$archive"
 shasum -a 256 "$archive"
 tar -tzf "$archive" | head
 rm "$archive"
 ```
 
-Use that digest to replace `sha256` in `Formula/rex-agents.rb`; remove its release-blocker
-comment. Do not hash a locally generated `git archive`: its bytes need not match GitHub's.
-Remove the temporary release-preparation notice from the README and mark the changelog entry
-with the release date. Commit these as a follow-up on `main`, then push after review. Do not
-retag the source commit to include the checksum: that would change the archive being hashed.
+In `Formula/rex-agents.rb`, update `url` to the new tag and `sha256` to this digest. Do not
+hash a locally generated `git archive`: its bytes need not match GitHub's. Prepare the formula
+update on a branch, have it reviewed, then land it on `main` and push with approval. Use a
+separate checkout if the development checkout is a live Rex installation. Do not retag the
+source commit to include the checksum: that would change the archive being hashed.
 
 ## 4. Test the stable formula
 
@@ -53,6 +57,8 @@ On a disposable macOS account or machine with Homebrew (not the live development
 
 ```sh
 brew tap oliver-kriska/rex-agents https://github.com/oliver-kriska/rex-agents
+# Homebrew 7 requires trust before loading this third-party tap's formula.
+brew trust oliver-kriska/rex-agents
 brew update
 brew style oliver-kriska/rex-agents/rex-agents
 brew audit --strict --formula oliver-kriska/rex-agents/rex-agents
@@ -61,8 +67,10 @@ brew test oliver-kriska/rex-agents/rex-agents
 rex-agents setup --help
 ```
 
-If that formula is already installed on the disposable machine, use `brew reinstall
---build-from-source` instead. Check the installed wrapper points through `opt/rex-agents`,
+On older Homebrew versions without `brew trust`, omit that step. If the formula is already
+installed on the disposable machine, use
+`brew reinstall --build-from-source oliver-kriska/rex-agents/rex-agents` instead.
+Check the installed wrapper points through `opt/rex-agents`,
 not a fixed Cellar version. Installation alone must not load a watcher or alter Rex config.
 Setup/uninstall behaviour is separately covered by `sh tests/setup.sh`, which stubs both
 launchctl and Rex; changing HOME alone is not safe isolation for launchd.
