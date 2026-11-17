@@ -98,7 +98,18 @@ can set `ready = { path = "~/Library/Application Support/my-hub/hub.sock", timeo
 rex-agents waits for that path (including sockets) before proceeding. A timeout warns and
 continues; an already-running program is treated as ready immediately.
 
-Before launching a labelled program, rex-agents checks machine-wide process argv for the
+For wrappers that exec another runtime (for example a launcher that becomes `beam.smp`), set
+`running = { socket = "~/Library/Application Support/my-hub/hub.sock" }`. This overrides argv
+matching: the Unix stream socket must accept a connection, not merely exist. A stale socket
+file does not count as running. The probe uses macOS `/usr/bin/nc` with empty stdin and sends
+no payload; it checks reachability, not application health. Use a socket this user can access.
+Socket mode reports `already running (hub.sock answers)` without PID or pane attribution.
+
+Set `ready = true` to wait for the running check (30 s), or use `ready = { path = "…",
+timeout = 30 }`. When that path is the configured running socket, readiness also requires a
+successful connection. Other readiness paths retain their existence check.
+
+Without a `running` override, rex-agents checks machine-wide process argv for the
 configured command as a whole-argument prefix (extra trailing flags are allowed). Existing
 copies are omitted from the picker and reported with their PID and, when visible on this Rex
 server, session/pane. Revive uses the **current config command**, never a stale saved one.
@@ -229,8 +240,8 @@ inside that pane doesn't take it) and the file is recent (saves happen every 2 m
 ## Settings
 
 `~/.config/rex/rex-agents.local.lua` returns a table (see `examples/rex-agents.local.lua`):
-extra `viewers`, `labelled` panes (`label` + `cwd_suffix` → `cmd`, optional `ready.path` and
-`ready.timeout` in seconds, default 30), service panes (`services.labels`
+extra `viewers`, `labelled` panes (`label` + `cwd_suffix` → `cmd`, optional `running.socket`,
+`ready = true` or `ready.path` and `ready.timeout` in seconds, default 30), service panes (`services.labels`
 and the init.lua `services.action` to run), `keep_missing`, and `notify = false` to turn off the
 notice after a restart.
 
@@ -250,14 +261,14 @@ Environment overrides, mainly for tests: `REX_AGENTS_STATE`, `REX_AGENTS_TEMPLAT
 - Nothing here stops or restarts a Rex server.
 - The duplicate guard reads exact argv, not shell aliases or arbitrary command compositions.
   An unreadable candidate that still exists stops the check rather than allowing a duplicate.
-  It cannot identify a program that replaces itself with unrelated argv. Configure the
-  long-running executable, not a short-lived launcher.
+  For a program that replaces itself with unrelated argv, configure `running.socket` instead.
   External/manual starts can race the check; the program itself must enforce a strict singleton.
 - Labelled launches sharing a state directory are serialized with `labelled-start.lock`. A
-  crash or launch not observed within 10 seconds leaves the lock intact to prevent another
-  launch. Inspect the program and pane before removing that empty directory and retrying.
-  Separate state directories do not share this lock. Service actions remain user-owned code;
-  they must avoid launching duplicates themselves.
+  launch not confirmed within 10 seconds warns and releases the lock (when readiness is the
+  running probe, its timeout applies instead). Abandoned locks at least two minutes old are
+  removed on the next launch attempt. Long readiness waits can outlive this lease; slow starts
+  and retries still need program-level singleton protection. Separate state directories do
+  not share this lock. Service actions remain user-owned code and must avoid duplicates themselves.
 
 ## Tests
 

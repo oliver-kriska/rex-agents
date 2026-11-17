@@ -8,13 +8,14 @@
 #
 # Covers: save → server restart → revive; park → reopen with conversations; template round trip;
 # HUB_NAME names (chosen once, kept across restart/revive/park, made unique on template-open).
-# Usage: tests/e2e.sh            (needs cc, jq, fzf not required)
+# Usage: tests/e2e.sh            (needs cc, jq, python3; fzf not required)
 #        REX_BIN=/path/to/rex tests/e2e.sh   (test another Rex version)
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d "${TMPDIR:-/tmp}/rex-agents-e2e.XXXXXX")
 SOCK="/tmp/rex-agents-e2e-$$.sock" # unix socket paths must stay short
+HUB_SOCK="/tmp/rex-agents-hub-$$.sock"
 URL="unix://$SOCK"
 # REX_BIN picks the Rex binary (e.g. a downloaded preview not yet running as your server). The test
 # server, every client call and bin/rex-agents (through $T/bin/rex, first on PATH) all use it.
@@ -42,7 +43,7 @@ stop_extra() {
   fi
   EXTRA_PID=
 }
-cleanup() { stop_extra; stop_server; rm -f "$SOCK"; rm -rf "$T"; }
+cleanup() { stop_extra; stop_server; rm -f "$SOCK" "$HUB_SOCK"; rm -rf "$T"; }
 trap cleanup EXIT INT TERM
 
 # ---- environment: fakes first on PATH, private dirs, a zsh that reads none of your rc files
@@ -466,6 +467,89 @@ sleep 2.5
 [ "$(grep -c '^hub-server$' "$T/events.txt")" -eq "$((BEFORE + 1))" ] || { cat "$T/a.txt" "$T/b.txt"; fail "concurrent clients started duplicate hubs"; }
 cat "$T/a.txt" "$T/b.txt" | grep -Eq 'already running|labelled launch locked' || fail "concurrent loser explains the skip"
 ok "concurrent template clients start exactly one labelled program"
+
+# A launcher that execs a different runtime cannot be found by its original argv.
+# Python is only a test fixture; the production probe uses macOS nc with empty stdin.
+PYTHON=$(command -v python3)
+cat >"$T/listener.py" <<'PY'
+import os, socket, sys, time
+path, starts = sys.argv[1:3]
+with open(starts, "a") as f:
+    f.write("launch\n")
+if len(sys.argv) > 3:
+    sys.exit(0)  # the launcher ran, but no listening process ever appeared
+time.sleep(1)
+if os.path.exists(path):
+    os.unlink(path)
+server = socket.socket(socket.AF_UNIX)
+server.bind(path)
+server.listen(16)
+print("SOCKET READY", flush=True)
+while True:
+    client, _ = server.accept()
+    assert client.recv(1) == b"", "probe sent a payload"
+    client.close()
+PY
+cat >"$T/bin/hub-wrapper" <<EOF
+#!/bin/sh
+exec "$PYTHON" -u "$T/listener.py" "\$@"
+EOF
+chmod +x "$T/bin/hub-wrapper"
+cat >"$T/socket.lua" <<EOF
+return { labelled = { socket_hub = {
+  cmd = { "$T/bin/hub-wrapper", "$HUB_SOCK", "$T/socket-starts" },
+  running = { socket = "$HUB_SOCK" }, ready = true,
+} } }
+EOF
+jq -n --arg cwd "$T/w/plain" --arg cmd "$T/bin/hub-wrapper '$HUB_SOCK' '$T/socket-starts'" \
+  '{name:"SocketHub",windows:[{label:"Work",layout:{block:{label:"socket_hub",cwd:$cwd,cmd:$cmd}}}]}' >"$T/templates/socket-hub.json"
+REX_AGENTS_CONFIG="$T/socket.lua" "$RA" template-open socket-hub >"$T/socket.txt"
+wait_for SocketHub socket_hub '^SOCKET READY'
+grep -q 'not confirmed\|timed out' "$T/socket.txt" && fail "wrapper launch confirmed by socket"
+[ ! -d "$T/agents/labelled-start.lock" ] || fail "socket-confirmed launch releases lock"
+REX_AGENTS_CONFIG="$T/socket.lua" "$RA" save >/dev/null
+REX_AGENTS_CONFIG="$T/socket.lua" "$RA" status --json | jq -e --arg msg "already running ($(basename "$HUB_SOCK") answers)" \
+  '[.panes[] | select(.session == "SocketHub")][0].state == $msg' >/dev/null || fail "socket override status"
+jq '.name = "SocketCopy"' "$T/templates/socket-hub.json" >"$T/templates/socket-copy.json"
+REX_AGENTS_CONFIG="$T/socket.lua" "$RA" template-open socket-copy >"$T/socket.txt"
+grep -q 'already running (.* answers)' "$T/socket.txt" || fail "socket blocks duplicate launch"
+[ "$(wc -l <"$T/socket-starts")" -eq 1 ] || fail "wrapper launched twice"
+pane SocketCopy socket_hub | grep -q hub-wrapper && fail "socket duplicate was typed"
+
+# A closed listener leaves a socket file. It must fail both running and matching ready.path probes.
+rx send -s SocketHub -b "$(bid_of SocketHub socket_hub)" $'\003'
+sleep 0.5
+[ -S "$HUB_SOCK" ] || fail "stale socket fixture must exist"
+sed "s@ready = true@ready = { path = \"$HUB_SOCK\", timeout = 0 }@" "$T/socket.lua" >"$T/socket-path.lua"
+cat >"$T/stale.lua" <<EOF
+package.path = "$ROOT/?.lua;" .. package.path
+local A = require("rex-agents.core")
+assert(not A.labelled_running("socket_hub"), "stale socket marked running")
+assert(A.wait_ready("socket_hub"):find("timed out"), "stale socket marked ready")
+EOF
+REX_AGENTS_CONFIG="$T/socket-path.lua" rx do "$T/stale.lua" >/dev/null
+jq '.name = "SocketRestart"' "$T/templates/socket-hub.json" >"$T/templates/socket-restart.json"
+# Fresh locks refuse a launch; abandoned ones recover without manual intervention.
+mkdir "$T/agents/labelled-start.lock"
+REX_AGENTS_CONFIG="$T/socket.lua" "$RA" template-open socket-restart >"$T/socket.txt"
+grep -q 'labelled launch locked' "$T/socket.txt" || fail "fresh lock must not be removed"
+touch -t 200001010000 "$T/agents/labelled-start.lock"
+REX_AGENTS_CONFIG="$T/socket.lua" "$RA" save >/dev/null
+REX_AGENTS_CONFIG="$T/socket.lua" "$RA" revive >"$T/socket.txt"
+grep -q '^started:' "$T/socket.txt" || { cat "$T/socket.txt"; fail "expired lock permits stale socket restart"; }
+[ "$(wc -l <"$T/socket-starts")" -eq 2 ] || fail "stale socket did not restart exactly once"
+[ ! -d "$T/agents/labelled-start.lock" ] || fail "recovered lock released"
+ok "wrapper argv: socket confirms launch, blocks duplicates, rejects stale files; expired locks recover"
+
+# A wrapper that exits without listening must warn and release the lock, not wedge all launches.
+sed "s@\"$T/socket-starts\"@\"$T/socket-starts\", \"--no-socket\"@; s@$HUB_SOCK@$HUB_SOCK.missing@g; s@ready = true@ready = false@" \
+  "$T/socket.lua" >"$T/unconfirmed.lua"
+jq --arg cmd "$T/bin/hub-wrapper '$HUB_SOCK.missing' '$T/socket-starts' --no-socket" \
+  '.name = "Unconfirmed" | .windows[0].layout.block.cmd = $cmd' "$T/templates/socket-hub.json" >"$T/templates/unconfirmed.json"
+REX_AGENTS_CONFIG="$T/unconfirmed.lua" "$RA" template-open unconfirmed >"$T/socket.txt"
+grep -q 'launch not confirmed within 10s' "$T/socket.txt" || { cat "$T/socket.txt"; fail "unconfirmed launch warning"; }
+[ ! -d "$T/agents/labelled-start.lock" ] || fail "unconfirmed launch leaked lock"
+ok "unconfirmed wrapper launch warns and releases lock"
 
 "$REX" --autostart=false -S "$URL" do "$ROOT/tests/unit.lua" >"$T/unit.txt" || { cat "$T/unit.txt"; fail "unit tests"; }
 tail -1 "$T/unit.txt"

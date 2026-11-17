@@ -187,6 +187,13 @@ do
   check("same_server other uuid", A.same_server("y", "x", {}), false)
   check("same_server nil", A.same_server(nil, "x", {}), false)
 
+  local labelled = A.config.labelled
+  A.config.labelled = { probe = { cmd = { "wrapper" }, running = { socket = tmp .. "/missing.sock" } } }
+  check("socket override does not fall back to matching argv", A.labelled_running("probe", { probe = { 123 } }, {}, {}), nil)
+  A.config.labelled.probe.running.socket = A.paths.snap
+  check("existing regular file is not a running socket", A.labelled_running("probe"), nil)
+  A.config.labelled = labelled
+
   A.paths.snap, A.paths.prev = saved.snap, saved.prev
   A.paths.names = saved.names
   A.snapshot, A.server_id, A.legacy_server_id = saved.snapshot, saved.server_id, saved.legacy

@@ -532,7 +532,7 @@ function M.labelled_processes()
     if pid then
       parents[tonumber(pid)] = tonumber(parent)
       for _, config in pairs(M.config.labelled) do
-        if args:find(basename(config.cmd[1]), 1, true) then
+        if not config.running and args:find(basename(config.cmd[1]), 1, true) then
           pids[#pids + 1] = pid
           break
         end
@@ -552,7 +552,7 @@ function M.labelled_processes()
   end
   for pid, info in pairs(data) do
     for label, config in pairs(M.config.labelled) do
-      if M.argv_prefix(info.argv, config.cmd) then
+      if not config.running and M.argv_prefix(info.argv, config.cmd) then
         matches[label] = matches[label] or {}
         table.insert(matches[label], tonumber(pid))
       end
@@ -577,7 +577,21 @@ function M.process_location(pid, parents, views)
   end
 end
 
+-- macOS nc -Uz connects but exits 1 even on success. Empty stdin without -z closes immediately
+-- after connecting, sends no payload, and distinguishes a listener from a stale socket file.
+function M.socket_answers(path)
+  local r, err = exec({ "/usr/bin/nc", "-U", "-w", "1", expand_home(path) },
+    { stdin = "", timeout = 2, stdout = false, stderr = false })
+  if not r then error("socket probe failed: " .. tostring(err), 0) end
+  return r.ok
+end
+
 function M.labelled_running(label, matches, parents, views)
+  local running = M.config.labelled[label].running
+  if running then
+    if M.socket_answers(running.socket) then return "already running (" .. basename(running.socket) .. " answers)" end
+    return nil -- this probe overrides argv, including while a wrapper starts its runtime
+  end
   if not matches then matches, parents = M.labelled_processes() end
   local pid = matches[label] and matches[label][1]
   if not pid then return nil end
@@ -1299,23 +1313,30 @@ function M.type_into(sid, bid, text)
 end
 
 function M.wait_ready(label)
-  local ready = M.config.labelled[label].ready
+  local config = M.config.labelled[label]
+  local ready = config.ready
   if not ready then return end
-  local path = expand_home(ready.path)
-  local deadline = os.time() + (ready.timeout or 30)
+  local path = ready ~= true and expand_home(ready.path) or nil
+  local socket = config.running and expand_home(config.running.socket)
+  local deadline = os.time() + (ready ~= true and ready.timeout or 30)
   repeat
-    local r = exec({ "test", "-e", path }) -- includes sockets, which io.open cannot read
-    if r and r.ok then return end
+    if ready == true then
+      if M.labelled_running(label) then return end
+    elseif socket == path then
+      if M.socket_answers(path) then return end
+    else
+      local r = exec({ "test", "-e", path })
+      if r and r.ok then return end
+    end
     if os.time() >= deadline or not rex.sleep then break end
     rex.sleep(0.2)
   until false
-  return label .. ": readiness timed out waiting for " .. path .. "; continuing"
+  return label .. ": readiness timed out waiting for " .. (path or "running check") .. "; continuing"
 end
 
--- Serialize labelled launches using this state directory until the exact program appears.
--- A crash or unconfirmed launch leaves the lock behind rather than risk starting another copy.
+-- Serialize labelled launches while they start. Expire abandoned locks after two minutes;
+-- an unconfirmed launch warns but must not block every subsequent labelled launch indefinitely.
 function M.start_command(sid, bid, text, label, hold)
-  local keep_lock = false
   local function start()
     local deadline = os.time() + 10
     local state = M.pane_state(sid, bid)
@@ -1332,25 +1353,40 @@ function M.start_command(sid, bid, text, label, hold)
     if hold then
       return block_call(sid, "write", { block_id = bid, data = text })
     end
-    keep_lock = label ~= nil
     local ok, err = M.type_if_idle(sid, bid, text, 0)
     if not ok or not label then return ok, err end
+    local config = M.config.labelled[label]
+    local ready = config.ready
+    -- When readiness is the running probe, honor its timeout instead of failing at 10s first.
+    if ready == true or (ready and config.running and expand_home(ready.path) == expand_home(config.running.socket)) then
+      return ok, M.wait_ready(label)
+    end
     deadline = os.time() + 10
     repeat
-      if M.labelled_running(label) then keep_lock = false; break end
+      if M.labelled_running(label) then return ok, M.wait_ready(label) end
       if os.time() >= deadline or not rex.sleep then break end
       rex.sleep(0.2)
     until false
-    if keep_lock then return ok, label .. ": launch unconfirmed; labelled-start.lock retained; inspect before retrying" end
-    return ok, M.wait_ready(label)
+    return ok, label .. ": launch not confirmed within 10s; continuing"
   end
   if not label then return start() end
   mkdir(M.paths.state)
   local lock = M.paths.state .. "/labelled-start.lock"
   local r = exec({ "mkdir", lock })
+  if r and not r.ok then
+    local st = exec({ "/usr/bin/stat", "-f", "%m", lock })
+    local modified = st and st.ok and tonumber(st.stdout)
+    if modified and os.time() - modified >= 120 then
+      exec({ "rmdir", lock }) -- only an empty lock directory; never delete state recursively
+      r = exec({ "mkdir", lock })
+    end
+  end
   if not r or not r.ok then return nil, "labelled launch locked: " .. lock end
+  local owner = exec({ "/usr/bin/stat", "-f", "%i", lock })
   local ok, result, detail = pcall(start)
-  if not keep_lock then exec({ "rmdir", lock }) end
+  local current = exec({ "/usr/bin/stat", "-f", "%i", lock })
+  -- A long readiness wait may outlive the lease; do not remove a replacement owner's lock.
+  if owner and owner.ok and current and current.ok and owner.stdout == current.stdout then exec({ "rmdir", lock }) end
   if not ok then return nil, tostring(result) end
   return result, detail
 end
