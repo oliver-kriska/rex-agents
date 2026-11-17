@@ -8,14 +8,16 @@ while [ -L "$self" ]; do
 done
 dir=${REX_AGENTS_DIR:-$(cd "$(dirname "$self")/../rex-agents" && pwd)}
 
-rex=$(command -v rex 2>/dev/null)
+rex=${REX_AGENTS_REX:-$(command -v rex 2>/dev/null)}
 [ -n "$rex" ] || rex="$HOME/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex"
 
 # Pin the server with -S: if REX_SERVER names a server that is not answering, rex would
 # otherwise fall back to the home server. Inside a Rex pane, REX_SERVER is that pane's server.
 REX_AGENTS_SERVER=${REX_AGENTS_SERVER:-$REX_SERVER}
 REX_AGENTS_ARGV=$(printf '%s\037' "$@")
-export REX_AGENTS_ARGV REX_AGENTS_SERVER
+# REX_AGENTS_REX: the rex the Lua side runs for `rex do -s` (services), the same binary as here.
+REX_AGENTS_REX=$rex
+export REX_AGENTS_ARGV REX_AGENTS_SERVER REX_AGENTS_REX
 if [ -n "$REX_AGENTS_SERVER" ]; then
   exec "$rex" --autostart=false -S "$REX_AGENTS_SERVER" do "$dir/cli.lua"
 fi

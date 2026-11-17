@@ -205,8 +205,10 @@ extra `viewers`, `labelled` panes (`label` + `cwd_suffix` → `cmd`), service pa
 and the init.lua `services.action` to run), and `keep_missing`.
 
 Environment overrides, mainly for tests: `REX_AGENTS_STATE`, `REX_AGENTS_TEMPLATES`,
-`REX_AGENTS_CLAUDE_SESSIONS`, `REX_AGENTS_CONFIG`, `REX_AGENTS_SERVER`, and
-`REX_AGENTS_WATCH_LABEL` (the LaunchAgent `status`/`verify` check; `-` skips the check).
+`REX_AGENTS_CLAUDE_SESSIONS`, `REX_AGENTS_CONFIG`, `REX_AGENTS_SERVER`,
+`REX_AGENTS_WATCH_LABEL` (the LaunchAgent `status`/`verify` check; `-` skips the check), and
+`REX_AGENTS_REX` (the `rex` binary; `bin/rex-agents` sets it to the one it runs, so the services
+`rex do -s` uses the same version).
 
 ## Safety notes
 
@@ -221,10 +223,17 @@ Environment overrides, mainly for tests: `REX_AGENTS_STATE`, `REX_AGENTS_TEMPLAT
 ```sh
 rex do tests/unit.lua   # pure helpers (argv filtering, quoting, JSON, layouts)
 tests/e2e.sh            # full cycle on a private throwaway server with fake claude/amp binaries
+REX_BIN=/path/to/rex tests/e2e.sh   # the same with another Rex binary (server and clients)
 ```
 
 `e2e.sh` starts its own `rex server run` on a private socket, saves, restarts that server with
-SIGTERM to its own PID, revives, parks and reopens a session, and checks every pane's argv.
+SIGTERM to its own PID, revives, parks and reopens a session, moves a tab to a new session, and
+checks every pane's argv.
+
+Tested with Rex 0.1.0-preview.18 and 0.1.0-preview.20 (all e2e checks pass on both). On
+preview.20, blocks made by `session.create` are still owned by the client that created them; the
+current online docs describe blocks that start without an owner, which only affects `resize` and
+`set_theme`, not the `write` that start-pending uses.
 
 ## Limits
 

@@ -1200,7 +1200,8 @@ end
 function M.run_services(sid)
   local action = M.config.services.action
   if not action then return nil, "no services action configured" end
-  local argv = { "rex", "--autostart=false" }
+  -- the same rex binary bin/rex-agents ran (PATH here prefers the installed app's)
+  local argv = { env("REX_AGENTS_REX", "rex"), "--autostart=false" }
   local pin = os.getenv("REX_AGENTS_SERVER")
   if pin and pin ~= "" then argv[#argv + 1] = "-S"; argv[#argv + 1] = pin end -- never fall back to another server
   for _, a in ipairs({ "do", "-s", sid, action }) do argv[#argv + 1] = a end

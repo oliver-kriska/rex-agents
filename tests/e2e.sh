@@ -9,13 +9,16 @@
 # Covers: save → server restart → revive; park → reopen with conversations; template round trip;
 # HUB_NAME names (chosen once, kept across restart/revive/park, made unique on template-open).
 # Usage: tests/e2e.sh            (needs cc, jq, fzf not required)
+#        REX_BIN=/path/to/rex tests/e2e.sh   (test another Rex version)
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d "${TMPDIR:-/tmp}/rex-agents-e2e.XXXXXX")
 SOCK="/tmp/rex-agents-e2e-$$.sock" # unix socket paths must stay short
 URL="unix://$SOCK"
-REX=$(command -v rex || echo "$HOME/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex")
+# REX_BIN picks the Rex binary (e.g. a downloaded preview not yet running as your server). The test
+# server, every client call and bin/rex-agents (through $T/bin/rex, first on PATH) all use it.
+REX=${REX_BIN:-$(command -v rex || echo "$HOME/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex")}
 SERVER_PID=
 
 rx() { "$REX" --autostart=false -S "$URL" "$@"; }
@@ -37,6 +40,7 @@ trap cleanup EXIT INT TERM
 mkdir -p "$T/bin" "$T/state" "$T/cfg" "$T/agents" "$T/templates" "$T/claude" "$T/amp/threads" "$T/zdot" "$T/w/dir with space" "$T/w/hub-live" "$T/w/plain"
 cc -O0 -o "$T/bin/claude" "$ROOT/tests/fake.c"
 cp "$T/bin/claude" "$T/bin/amp"
+ln -s "$REX" "$T/bin/rex"
 cat > "$T/zdot/.zshrc" <<EOF
 export PATH="$T/bin:\$PATH"
 PROMPT='e2e %# '
@@ -77,6 +81,7 @@ wait_for() { # wait_for SESSION LABEL REGEX
 }
 
 start_server
+echo "# $("$REX" version | head -1)"
 
 # ---- fixture
 cat > "$T/fixture.lua" <<EOF
@@ -285,6 +290,18 @@ CHILD=$(jq -r --arg b "$RB" '.blocks[$b].pids[1]' "$N")
 ps -o comm= -p "$CHILD" | grep -q claude || fail "second pid is the running child"
 jq -e '[.blocks[] | select(.kind != "claude" and .kind != "amp" and .kind != "amp-runner")] | length == 0' "$N" >/dev/null || fail "names.json lists agents only"
 ok "names.json: private, versioned, unique names, agent pids incl. the relaunched child; tolerant sessions parse"
+
+# ---- tab-to-session + start-pending: the new session's blocks come from session.create (on
+# preview.20 they start without an owner), and start-pending writes into them from another `rex do`
+BRK=$(rx ls --json | jq -r '.sessions[] | select(.label == "Broken") | .session_id')
+BWIN=$(rx window ls -s "$BRK" --json | jq -r '.windows[0].window_id')
+"$RA" tab-to-session "$BRK" "$BWIN" Moved >/dev/null
+wait_for Moved brk "claude --model opus --resume "
+pane Moved brk | grep -q "^FAKE" && fail "tab-to-session must type the command, not run it"
+"$RA" start-pending Moved | grep -q "^started brk" || fail "start-pending output"
+wait_for Moved brk "argv: \[--model\] \[opus\] \[--resume\]"
+jq -e '.Moved == null' "$T/agents/pending.json" >/dev/null || fail "start-pending clears what it started"
+ok "tab-to-session + start-pending: typed into session.create blocks, then run"
 
 "$REX" --autostart=false -S "$URL" do "$ROOT/tests/unit.lua" | tail -1
 echo "all e2e checks passed"
