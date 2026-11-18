@@ -105,7 +105,7 @@ mise install --force http:luarocks http:luacheck
 make check
 ```
 
-Update the README's version list and the CI mise version when appropriate. Keep the minimum
+Update docs/contributing.md's version list and the CI mise version when appropriate. Keep the minimum
 mise version in `mise.toml` aligned with the config features used. Test a fresh checkout with
 empty `MISE_DATA_DIR`, `MISE_CACHE_DIR` and `MISE_CONFIG_DIR` before merging tool updates,
 then run Rex e2e on both supported versions. Homebrew's own formula lint/audit tooling follows

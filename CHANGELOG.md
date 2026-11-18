@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Cancel revive when Enter is pressed with no selected rows. Make service actions selectable,
+  including services-only plans, instead of starting them implicitly.
+- Exclude Amp `--execute=…` one-shot jobs from recovery.
+- Treat a missing first snapshot as informational while still reporting watcher failures;
+  point missing-watcher guidance at `rex-agents setup`.
+- Reorganise the README around installation and daily use, with output examples and linked
+  references for templates, setup, hub clients and contributor checks.
+
 ## v0.1.0 — 2026-11-17
 
 First public release of rex-agents, a macOS Lua extension for Rex.

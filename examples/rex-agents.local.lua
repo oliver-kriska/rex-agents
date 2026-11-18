@@ -19,12 +19,12 @@ return {
   -- duplicate check, not singleton enforcement; use running.socket for runtime wrappers.
   labelled = {
     -- api = { cwd_suffix = "/my-app", cmd = { "mix", "phx.server" } },
-    -- hub = { cwd_suffix = "/my-hub", cmd = { "/usr/local/bin/my-hub", "start" },
-    --   running = { socket = "~/Library/Application Support/my-hub/hub.sock" }, ready = true },
+    -- worker = { cwd_suffix = "/my-app", cmd = { "/usr/local/bin/my-worker", "start" },
+    --   running = { socket = "~/Library/Application Support/my-worker/worker.sock" }, ready = true },
     -- running.socket overrides argv matching for wrappers that exec another runtime. The socket
     -- must accept a connection; a stale file is not running. No payload is sent.
     -- ready = true waits for the running check (30 s). Alternatively use
-    -- ready = { path = "~/Library/Application Support/my-hub/hub.sock", timeout = 30 }:
+    -- ready = { path = "~/Library/Application Support/my-worker/worker.sock", timeout = 30 }:
     -- that same socket must answer; other paths only need to exist. Timeout warns and continues.
     -- An already-running program is considered ready without waiting.
   },
@@ -33,8 +33,8 @@ return {
   -- revive runs the init.lua action named here once for that session
   -- (`rex do -s SESSION <action>`). In templates, each label gets the command given, or the
   -- running program's own arguments when the value is `true`.
-  -- Service actions are not picker rows: they run after accepting the command selection,
-  -- or immediately if only services are eligible. The action must check its own pane safety.
+  -- The picker has one service-action row per session; deselect it to skip services there.
+  -- Plain revive runs all eligible actions. The action must check its own pane safety.
   services = {
     labels = {
       -- server = "mix phx.server",
