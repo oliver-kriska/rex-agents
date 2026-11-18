@@ -7,8 +7,9 @@ Press **⌘⇧B**, select the panes to resume, and continue where you left off.
 Runs as a small Lua extension inside Rex. No hub, Python or Node required.
 Viewers, labelled programs, service actions and project templates are optional.
 
-<!-- demo video -->
-*Demo video coming soon: restart Rex → press ⌘⇧B → resume selected conversations.*
+https://github.com/user-attachments/assets/59f85a04-6293-4381-8673-1e98ec55dafc
+
+*Reopen a parked project with its tabs, panes and Claude conversation, then park it again.*
 
 ## Install
 
