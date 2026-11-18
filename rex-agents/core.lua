@@ -835,8 +835,10 @@ end
 
 local function amp_entry(pid, argv)
   local rest = slice(argv, 2)
-  if has(rest, "--execute") or has(rest, "-x") then
-    return nil -- one-shot executions are started by something else
+  for _, arg in ipairs(rest) do
+    if arg == "--execute" or arg == "-x" or starts_with(arg, "--execute=") then
+      return nil -- one-shot executions are started by something else
+    end
   end
   if has(rest, "--no-tui") then -- long-lived runner: start it again with the same arguments
     local a = concat({ "amp" }, rest)
@@ -1181,7 +1183,21 @@ function M.verify(against)
     return string.format("%s / %s / %s (%s)", e.session or "?", e.window or "?", e.label or "?", bid)
   end
 
+  local w = M.watcher()
+  if w then
+    if not w.loaded then err("watcher %s is not loaded (run rex-agents setup)", w.label)
+    elseif not w.pid then err("watcher %s is loaded but not running (see ~/Library/Logs/rex-agents.log)", w.label)
+    else note("watcher %s running, pid %d", w.label, w.pid) end
+  end
   local ok, snap = pcall(M.read_json, M.paths.snap)
+  if ok and snap == nil and not against then
+    -- Rex's io.open does not return the errno available in standalone Lua.
+    local exists = exec({ "test", "-e", M.paths.snap })
+    if exists and not exists.ok then
+      note("no save yet; the watcher saves at startup and every 120 s while sessions are open (or run rex-agents save)")
+      return { errors = errors, warnings = warnings, info = info }
+    end
+  end
   if not ok or type(snap) ~= "table" or type(snap.panes) ~= "table" then
     err("%s is missing or not valid JSON", M.paths.snap)
     return { errors = errors, warnings = warnings, info = info }
@@ -1227,13 +1243,6 @@ function M.verify(against)
   local server = M.server_id()
   if server and snap.server and not M.same_server(snap.server, server, {}) then
     warn("the last save is from before the Rex server restarted (%s, now %s)", snap.server, server)
-  end
-
-  local w = M.watcher()
-  if w then
-    if not w.loaded then err("watcher %s is not loaded (run ./install.sh)", w.label)
-    elseif not w.pid then err("watcher %s is loaded but not running (see ~/Library/Logs/rex-agents.log)", w.label)
-    else note("watcher %s running, pid %d", w.label, w.pid) end
   end
 
   if against then

@@ -8,7 +8,7 @@
 #
 # Covers: save → server restart → revive; park → reopen with conversations; template round trip;
 # HUB_NAME names (chosen once, kept across restart/revive/park, made unique on template-open).
-# Usage: tests/e2e.sh            (needs cc, jq, python3; fzf not required)
+# Usage: tests/e2e.sh            (needs cc, jq, python3 and fzf)
 #        REX_BIN=/path/to/rex tests/e2e.sh   (test another Rex version)
 set -eu
 
@@ -174,6 +174,19 @@ rm -f "$T/ready"
 : >"$T/events.txt"
 start_server
 
+# The notice deliberately excludes shells still starting. Wait for this fixture's
+# restored panes before asserting the count, rather than racing shell startup.
+cat >"$T/restored.lua" <<EOF
+package.path = "$ROOT/?.lua;" .. package.path
+local A = require("rex-agents.core")
+for bid, e in pairs(A.load_snap().panes) do
+  if A.pane_state(e.session_id, bid) ~= "idle" then rex.stop(1) end
+end
+EOF
+i=0; until rx 'do' "$T/restored.lua" >/dev/null 2>&1; do
+  i=$((i + 1)); [ $i -lt 50 ] || fail "restored fixture shells did not become idle"; sleep 0.2
+done
+
 # ---- the watcher's notice after the restart: one per server instance, none with notify = false
 cat >"$T/notify.sh" <<EOF
 #!/bin/sh
@@ -215,6 +228,41 @@ ok "(a) restart: 12 panes kept, new server id, same hub names"
 
 # ---- a shell inside a shell counts as busy: revive skips that pane
 bid_of() { rx block ls -s "$1" --json | jq -r --arg l "$2" '.blocks[] | select(.label == $l) | .block_id' | head -1; }
+# Exercise the real fzf in a test-server terminal, including its cursor-row fallback.
+CONTROL=$(rx new Picker --json | jq -r .session_id)
+picker() {
+  PICKER=$(rx run -s "$CONTROL" --label picker --keep-open --json -- env \
+    FZF_DEFAULT_OPTS='--bind=ctrl-a:deselect-all' "$RA" revive --pick --pause | jq -r '.block_ids[0]')
+  wait_for "$CONTROL" picker 'revive>'
+}
+picker_done() {
+  wait_for "$CONTROL" picker 'press any key'
+  rx send-key -s "$CONTROL" -b "$PICKER" space
+  rx block close -s "$CONTROL" "$PICKER"
+}
+picker
+rx send-key -s "$CONTROL" -b "$PICKER" ctrl+a
+rx send-key -s "$CONTROL" -b "$PICKER" enter
+picker_done
+[ ! -s "$T/events.txt" ] || fail "empty selection started a program or service"
+[ "$("$RA" revive --dry-run | grep -vc '^services:')" = 11 ] || fail "empty selection revived a pane"
+picker
+rx send-key -s "$CONTROL" -b "$PICKER" esc
+picker_done
+[ ! -s "$T/events.txt" ] || fail "escape started a program or service"
+picker
+rx send-key -s "$CONTROL" -b "$PICKER" ctrl+a
+rx send -s "$CONTROL" -b "$PICKER" 'services: Proj'
+wait_for "$CONTROL" picker '1/12'
+rx send-key -s "$CONTROL" -b "$PICKER" tab
+rx send-key -s "$CONTROL" -b "$PICKER" enter
+picker_done
+[ "$(cat "$T/events.txt")" = services ] || fail "selecting the service row must run only that action"
+[ "$("$RA" revive --dry-run | grep -vc '^services:')" = 11 ] || fail "service selection started an unselected agent"
+: >"$T/events.txt"
+rx kill "$CONTROL"
+ok "picker: empty selection and Escape do nothing; services are explicitly selectable"
+
 rx send -s Proj -b "$(bid_of Proj amp)" $'zsh\r'
 i=0; until [ "$(rx block ls -s Proj --json >/dev/null; pane Proj amp | grep -c 'e2e %')" -ge 2 ] || [ $i -ge 50 ]; do i=$((i + 1)); sleep 0.2; done
 "$RA" revive >"$T/revive0.txt"
@@ -243,6 +291,18 @@ wait_for Proj runner "^hub=runner$"
 wait_for "Hub Names" named "^hub=worker-demo-2$"
 wait_for "Hub Names" envd "^hub=from-env$"
 wait_for "Hub Names" shell "^hub=hub-names-claude-"
+CONTROL=$(rx new ServicesPicker --json | jq -r .session_id)
+BEFORE=$(wc -l <"$T/services.txt")
+picker
+rx send-key -s "$CONTROL" -b "$PICKER" ctrl+a enter
+picker_done
+[ "$(wc -l <"$T/services.txt")" -eq "$BEFORE" ] || fail "services-only picker bypassed empty selection"
+picker
+rx send-key -s "$CONTROL" -b "$PICKER" enter
+picker_done
+[ "$(wc -l <"$T/services.txt")" -eq "$((BEFORE + 1))" ] || fail "selected services-only action did not run once"
+rx kill "$CONTROL"
+ok "services-only revive still asks; empty selection cancels, selected action runs once"
 "$RA" revive --dry-run | grep -q "^services:" || true
 "$RA" save >/dev/null
 [ "$(jq -r '[.panes[] | select(.kind != "services")] | map(.alive_on) | unique | length' "$P")" = 1 ] || fail "revived panes are alive on the new server"

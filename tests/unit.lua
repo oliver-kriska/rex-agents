@@ -83,6 +83,15 @@ local configured_hub = A.config.hub
 A.config.hub = false
 check("hub disabled prefix", A.hub_prefix({ kind = "claude", hub_name = "mgr" }), "")
 check("hub disabled template", A.rex_layout({ block = { cmd = "claude", hub_name = "mgr" } }, true).block.options.initial_input, "claude\r")
+-- Classify one-shot Amp invocations before considering runner mode.
+local original_argv = A.argv
+for _, arg in ipairs({ "-x", "--execute", "--execute=one shot", "--execute=" }) do
+  A.argv = function() return { "amp", "--no-tui", arg, "prompt" } end
+  check("skip Amp one-shot " .. arg, A.classify({ fg = "amp", pid = 1 }), nil)
+end
+A.argv = function() return { "amp", "--no-tui", "--execute-other=value" } end
+check("unrelated flag does not exclude runner", A.classify({ fg = "amp", pid = 1 }).kind, "amp-runner")
+A.argv = original_argv
 A.config.hub = true
 check("hub valid", A.hub_valid("worker-demo-2"), true)
 check("hub valid upper/dot", A.hub_valid("A.b_c-1"), true)
@@ -158,9 +167,22 @@ do
   assert(made.ok, "unit temp directory")
   local tmp = made.stdout:gsub("%s+$", "")
   local saved = { snap = A.paths.snap, prev = A.paths.prev, names = A.paths.names, snapshot = A.snapshot, server_id = A.server_id,
-    legacy = A.legacy_server_id }
+    legacy = A.legacy_server_id, watcher = A.watcher }
   A.paths.snap, A.paths.prev = tmp .. "/panes.json", tmp .. "/panes.prev.json"
   A.paths.names = tmp .. "/names.json"
+  A.watcher = function() return { label = "test", loaded = true, pid = 123 } end
+  local first = A.verify()
+  check("verify before first save is informational", { #first.errors, (first.info[2] or ""):match("^no save yet") ~= nil }, { 0, true })
+  check("verify against requires current snapshot", #A.verify(tmp .. "/previous.json").errors > 0, true)
+  A.watcher = function() return { label = "test", loaded = false } end
+  check("missing snapshot must not hide missing watcher", A.verify().errors[1], "watcher test is not loaded (run rex-agents setup)")
+  A.watcher = function() return { label = "test", loaded = true } end
+  check("missing snapshot must not hide stopped watcher", #A.verify().errors, 1)
+  A.watcher = function() return nil end
+  local broken = assert(io.open(A.paths.snap, "w")); broken:write("{broken"); broken:close()
+  check("corrupt snapshot is still a problem", #A.verify().errors, 1)
+  A.write_json(A.paths.snap, {})
+  check("snapshot without panes is still a problem", #A.verify().errors, 1)
   local function idle_view()
     return { { session_id = "s", label = "S", windows = { { label = "W", layout = { block_id = "b1", fg = "zsh" } } } } }
   end
@@ -203,6 +225,7 @@ do
   A.paths.snap, A.paths.prev = saved.snap, saved.prev
   A.paths.names = saved.names
   A.snapshot, A.server_id, A.legacy_server_id = saved.snapshot, saved.server_id, saved.legacy
+  A.watcher = saved.watcher
   A.exec({ "rm", "-rf", tmp })
 end
 

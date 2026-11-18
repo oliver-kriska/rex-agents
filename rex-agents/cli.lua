@@ -109,11 +109,18 @@ local function cmd_revive(a)
   end
   local chosen = {}
   for _, t in ipairs(plan.todo) do chosen[t.bid] = true end
-  if pick and #plan.todo > 0 then
+  for _, s in ipairs(plan.services) do chosen["services:" .. s] = true end
+  if pick then
     local rows = {}
     for _, t in ipairs(plan.todo) do rows[#rows + 1] = t.bid .. "\t" .. A.revive_row(t) end
+    for _, s in ipairs(plan.services) do
+      local v = A.view(s)
+      rows[#rows + 1] = "services:" .. s .. "\tservices: " .. (v and v.label or s) .. " → " .. A.config.services.action
+    end
     local sel = fzf(rows, { "--multi", "--reverse", "--with-nth=2..", "--delimiter=\t", "--bind=load:select-all",
-      "--prompt=revive> ", "--header=tab: toggle · enter: start the selected · esc: cancel" })
+      -- accept-non-empty still accepts the cursor row when no rows are marked.
+      "--bind=enter:transform:[ \"$FZF_SELECT_COUNT\" -gt 0 ] && echo accept || echo abort",
+      "--prompt=revive> ", "--header=tab: toggle · enter: start selected (none: cancel) · esc: cancel" })
     if not sel then return end
     chosen = {}
     for _, l in ipairs(sel) do chosen[l:match("^([^\t]*)")] = true end
@@ -131,8 +138,10 @@ local function cmd_revive(a)
   end
   for _, t in ipairs(plan.todo) do if t.labelled then start(t) end end
   for _, s in ipairs(plan.services) do
-    local out, err = A.run_services(s)
-    print("services: " .. tostring(out or err):sub(1, 200))
+    if chosen["services:" .. s] then
+      local out, err = A.run_services(s)
+      print("services: " .. tostring(out or err):sub(1, 200))
+    end
   end
   for _, t in ipairs(plan.todo) do if not t.labelled then start(t) end end
 end
