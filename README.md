@@ -98,7 +98,7 @@ A normal installation also shows watcher health: `watcher: running (pid N)` in s
 
 ### Bring programs back after a restart
 
-**⌘⇧B** saves once, then lists eligible programs with their session, pane/tab, directory and kind. Confirming an empty selection does nothing. Services have one selectable **whole-session action** each, not per-pane control. Older servers, unavailable clients and failed prompts fall back to the floating fzf picker; cancellation and timeout never open a fallback.
+**⌘⇧B** lists eligible programs from the last watcher save, with their session, pane/tab, directory and kind. It rechecks each selected pane before typing. Confirming an empty selection does nothing. Services have one selectable **whole-session action** each, not per-pane control. Older servers, unavailable clients and failed prompts fall back to the floating fzf picker, which saves first; cancellation and timeout never open a fallback.
 
 Use `rex-agents revive --dry-run` to inspect the plan, or `revive --pick` for fzf in your terminal. **Plain `revive` starts all eligible commands without asking.** `revive --only ID,ID` selects only those block IDs; `services:SESSION_ID` explicitly selects a whole-session service action. [Picker/output details](docs/advanced.md#picker-output).
 
@@ -209,6 +209,7 @@ Missing keys keep their defaults; lists extend defaults and maps merge by key.
 | Local config key | Default | Meaning |
 | --- | --- | --- |
 | `hub` | `false` | Only literal `true` enables hub integration. |
+| `resume_prompt` | `nil` (off) | With hub enabled, send one initial prompt on eligible Claude conversation restores. Costs one turn per restored session; [temporary waiter workaround](docs/names-json.md#optional-resume-prompt). |
 | `notify` | `true` | Restart notification; `false` disables it. |
 | `keep_missing` | `604800` | Seconds to retain missing panes (one week). |
 | `shells` | `{"zsh","-zsh","bash","-bash","sh","fish","login"}` | Add foreground names treated as shells. |

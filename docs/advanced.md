@@ -163,7 +163,7 @@ The watcher saves at startup, every 120 s and 20 s after the first process/block
 | `notified.json` in that directory | Server instance considered for a restart notification. |
 | `last-template.json` in that directory | Last successfully opened template slug; atomic, mode 600. |
 | `names.json` in that directory | Private hub map, only with hub enabled. |
-| `names.lock` in that directory | Serialises full saves and launch-time hub map updates; abandoned locks expire after two minutes. |
+| `names.lock` in that directory | Serialises final snapshot/map commits, not process scans; abandoned locks expire after two minutes. |
 | `labelled-start.lock` in that directory | Temporary launch-serialisation directory. |
 | `~/Library/Logs/rex-agents.log` | Watcher saves, skipped saves and errors. |
 | `~/Library/LaunchAgents/com.rex-agents.watch.plist` | Watcher pinned to the setup endpoint. |

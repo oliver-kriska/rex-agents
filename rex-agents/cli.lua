@@ -111,7 +111,7 @@ local function cmd_revive(a)
     return
   end
   if dry then
-    for _, t in ipairs(plan.todo) do print(A.revive_row(t)) end
+    for _, t in ipairs(plan.todo) do print(A.revive_row(t, true)) end
     for _, s in ipairs(plan.services) do print("services: rex do -s " .. s .. " " .. tostring(A.config.services.action)) end
     return
   end
@@ -244,7 +244,7 @@ local function cmd_status(a)
         block_id = r.block_id, kind = r.kind, hub_name = r.hub_name, env_hub = r.env_hub, state = r.state,
         pending = r.state == "restart pending", reason = r.reason }
     end
-    print(A.encode({ panes = rows, saved_at = st.saved_at, watcher = st.watcher, warnings = st.warnings }))
+    print(A.encode({ panes = rows, saved_at = st.saved_at, watcher = st.watcher, warnings = st.warnings, resume_prompt = st.resume_prompt }))
     return
   end
   local function cut(s, n) s = tostring(s or ""); return #s > n and (s:sub(1, n - 1) .. "…") or s end
@@ -270,6 +270,9 @@ local function cmd_status(a)
       .. " (⌘⇧B after a Rex restart, or park → reopen).")
   end
   if idle > 0 then print(idle .. " pane(s) are idle shells; ⌘⇧B brings them back.") end
+  if st.resume_prompt and st.resume_prompt ~= "" then
+    print("resume_prompt (one turn on eligible Claude restores): " .. A.quote(st.resume_prompt))
+  end
   for _, warning in ipairs(st.warnings) do print("warning: " .. warning) end
 end
 

@@ -97,7 +97,8 @@ return function(opts)
     run = function(ctx)
       local function fallback() floating(ctx, "revive", { "revive", "--save-first", "--pick", "--pause" }) end
       if not has_ui() then return fallback() end
-      pcall(A().save) -- like --save-first: a failed or skipped save still revives from the last one
+      -- Use the watcher snapshot: a full save can take longer than the action's budget.
+      -- The CLI rechecks that each selected pane is idle immediately before typing.
       local plan = A().revive_plan()
       local items = A().revive_items(plan)
       if #items == 0 then return notice("Nothing to bring back: every saved pane is running or gone.", fallback) end

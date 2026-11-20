@@ -26,7 +26,9 @@ Revive, template-open and start-pending also publish a newly launched agent's PI
 
 This is a bounded best-effort startup path, not a guarantee that a failed or indefinitely slow agent starts. Rex IPC and OS scheduling can also stall beyond the polling budget. A consumer should allow at least the 10 s target and retain a retry/reconnect path, rather than assuming a row must exist on its first read. Entries can lag exits until the watcher reconciles them; always validate PID ancestry.
 
-Full scans and startup updates share `names.lock` so a concurrent save or launch cannot overwrite another launch's PID row. A busy full save is skipped; startup polling retries within its budget. An abandoned lock expires after two minutes. Names and format are unchanged; the `HUB_NAME` prefix is still supplied.
+Full scans discover processes **outside** `names.lock`. Only the final read/merge/write of `panes.json` and `names.json` is locked. Startup publication also saves the new pane's restore metadata, so an older scan cannot erase it. Under the lock, a scan re-reads current state and retains live entries published since its start (including the same timestamp second). Matching kind, hub name and an overlapping PID identify the same running agent: its PID lists are unioned. A replacement process does not inherit the old process's PIDs. Unseen, newly published live blocks are retained too.
+
+A busy commit is skipped; startup polling retries within its budget. An abandoned lock still expires after two minutes. Each JSON file is atomically replaced and mode 600; the two files are not a single filesystem transaction. The `HUB_NAME` prefix remains supplied. Consumers must continue validating PID ancestry.
 
 ```json
 {
@@ -45,9 +47,24 @@ Full scans and startup updates share `names.lock` so a concurrent save or launch
 }
 ```
 
-`saved_at` is a Unix timestamp in seconds. `session_id` identifies the **Rex session**, not a Claude conversation. Only running `claude`, `amp` and `amp-runner` panes appear. `pids` includes the foreground process and, when found, the relaunched Claude descendant (searched up to two levels down). Version 1 remains compatible with chief v0.1.0-pre.9.
+`saved_at` is a Unix timestamp in seconds. A block may also have `published_at`, the Unix-second timestamp of its startup publication; this producer merge watermark survives subsequent scans of the same running agent. Readers may ignore it. `session_id` identifies the **Rex session**, not a Claude conversation. Only recognised running `claude`, `amp` and `amp-runner` panes are published; exited entries can remain until the next full scan. `pids` includes the foreground process and, when found, the relaunched Claude descendant (searched up to two levels down).
 
 Disabling hub integration removes the map on the next successful save and stops generated prefixes, metadata, columns and validation. Explicit commands/inherited environments remain user-controlled: rex-agents does not strip manually supplied `HUB_NAME` values.
+
+## Optional resume prompt
+
+`resume_prompt` is off by default. It is a temporary workaround for resumed Claude conversations whose background `hub next` waiter did not restart; remove it once chief's hook-based recovery is available. It **costs one model turn per restored Claude session**, and is a request to the agent, not a guarantee that a waiter starts.
+
+Example settings (not enabled by installation):
+
+```lua
+hub = true,
+resume_prompt = "Session restored after a Rex restart. Check your hub inbox and restart your hub waiter.",
+```
+
+The prompt is appended as one shell-quoted positional argument only for a named Claude agent with `hub = true` and a `--resume ID` launch: revive or template-open in continue mode. Fresh launches, Amp, other programs and already-running panes receive no prompt. Saved restore arguments and generated templates omit it, so repeated save/restore cycles do not accumulate prompts. `revive --dry-run` shows the complete command; `status` and `verify` display the configured prompt for future eligible restores. A tab staged with `tab-to-session`/`start-pending` does not get this stopgap.
+
+Checked against Claude Code 2.1.329 `--help`: `[prompt]` is a positional argument, interactive mode is the default, and `--resume` accepts a session ID. No `-p` is added. Tests use fake agents to verify exact argv and quoting; they do not run a real conversation or prove that Claude follows the request.
 
 ## chief client rules (v0.1.0-pre.9)
 

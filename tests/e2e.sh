@@ -715,6 +715,95 @@ assert_published "Concurrent A" agent
 assert_published "Concurrent B" agent
 [ ! -d "$T/agents/names.lock" ] || fail "publication leaked its lock"
 
+# Freeze a scan after it captured its view, then publish a previously unseen agent.
+# The hook is confined to this test process; production has no test-delay environment switch.
+cat >"$T/slow-save.lua" <<EOF
+package.path = "$ROOT/?.lua;" .. package.path
+local A = require("rex-agents.core")
+local snapshot = A.snapshot
+A.snapshot = function()
+  local views = snapshot()
+  local f = assert(io.open("$T/scan-ready", "w")); f:close()
+  rex.sleep(12)
+  return views
+end
+assert(A.save().panes)
+EOF
+rx 'do' "$T/slow-save.lua" >"$T/slow-save.txt" &
+SCAN_PID=$!
+for _ in $(seq 1 150); do [ ! -e "$T/scan-ready" ] || break; sleep 0.2; done
+[ -e "$T/scan-ready" ] || fail "slow scan did not reach barrier"
+[ ! -d "$T/agents/names.lock" ] || fail "slow scan holds the publication lock"
+jq '.name = "During Scan" | .windows[0].layout.block.cmd = "claude"' "$T/templates/immediate.json" >"$T/templates/during-scan.json"
+STAMP=$(python3 -c 'import time; print(time.monotonic())')
+"$RA" template-open during-scan >"$T/during-scan.txt"
+assert_published "During Scan" agent
+DB=$(bid_of "During Scan" agent)
+DP=$(jq -r --arg b "$DB" '.blocks[$b].pids[0]' "$N")
+# A second full save must preserve the watermark needed by the first, older scan.
+"$RA" save >/dev/null
+wait "$SCAN_PID"
+jq -e --arg b "$DB" --argjson pid "$DP" '.blocks[$b].pids | index($pid) != null' "$N" >/dev/null || fail "slow scan lost publication"
+jq -e --arg b "$DB" '.panes[$b].revive[0] == "claude"' "$P" >/dev/null || fail "slow scan lost published pane"
+ok "slow scan does not block publication; names and pane survive overlapping full saves"
+
+# Real shell quoting and repeated save/revive cycles, with fake agents only.
+cat >"$T/prompt.lua" <<'EOF'
+return { hub = true, resume_prompt = "Check the team's inbox; $(echo unsafe)" }
+EOF
+RP="Check the team's inbox; \$(echo unsafe)"
+jq '.name = "Resume Prompt" | .windows[0].layout.block = {
+  label:"agent",cmd:"claude --model sonnet",resume:"claude --model sonnet --resume 11111111-2222-3333-4444-555555555555",hub_name:"prompt-worker"}' \
+  "$T/templates/immediate.json" >"$T/templates/resume-prompt.json"
+REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" template-open resume-prompt >/dev/null
+wait_for "Resume Prompt" agent '^session '
+PB=$(bid_of "Resume Prompt" agent)
+PSID=$(jq -r --arg b "$PB" '.blocks[$b].session_id' "$N")
+cat >"$T/prompt-argv.lua" <<EOF
+package.path = "$ROOT/?.lua;" .. package.path
+local A = require("rex-agents.core")
+local p = assert(A.block_call("$PSID", "process", { block_id = "$PB" }))
+local argv = assert(A.argv(p.foreground.pid))
+local text = "Check the team's inbox; \$(echo unsafe)"
+assert(argv[#argv] == text and argv[#argv - 1] == "--", A.encode(argv))
+local count = 0
+for _, word in ipairs(argv) do if word == text then count = count + 1 end end
+assert(count == 1, "resume prompt accumulated")
+EOF
+for _ in 1 2; do
+  pane "Resume Prompt" agent | grep -Fq "[$RP]" || fail "resume prompt was not one literal argument"
+  rx 'do' "$T/prompt-argv.lua" >/dev/null
+  REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" save >/dev/null
+  jq -e --arg b "$PB" '.panes[$b].revive == ["claude","--model","sonnet","--resume","11111111-2222-3333-4444-555555555555"]' \
+    "$P" >/dev/null || fail "saved argv retained resume prompt"
+  REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" template-save "$(jq -r --arg b "$PB" '.blocks[$b].session_id' "$N")" prompt-roundtrip >/dev/null
+  if grep -Fq 'Check the team' "$T/templates/prompt-roundtrip.json"; then fail "template retained resume prompt"; fi
+  PP=$(rx block call -s "Resume Prompt" -b "$PB" process | jq -r .foreground.pid)
+  REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" revive --only "$PB" >"$T/prompt-busy.txt"
+  [ "$(rx block call -s "Resume Prompt" -b "$PB" process | jq -r .foreground.pid)" = "$PP" ] || fail "revive changed running pane"
+  rx send-key -s "Resume Prompt" -b "$PB" ctrl+c
+  sleep 0.3
+  REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" revive --dry-run >"$T/prompt-plan.txt"
+  grep -Fq 'Check the team' "$T/prompt-plan.txt" || fail "dry run omitted resume prompt"
+  REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" revive --only "$PB" >/dev/null
+  wait_for "Resume Prompt" agent '^session '
+done
+rx 'do' "$T/prompt-argv.lua" >/dev/null
+REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" status | grep -q '^resume_prompt ' || fail "status omitted resume prompt"
+REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" verify >"$T/prompt-verify.txt"
+grep -q '^resume_prompt ' "$T/prompt-verify.txt" || fail "verify omitted resume prompt"
+for mode in fresh off; do
+  jq --arg name "Prompt $mode" '.name = $name' "$T/templates/resume-prompt.json" >"$T/templates/prompt-$mode.json"
+  if [ "$mode" = fresh ]; then
+    REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" template-open "prompt-$mode" --fresh >/dev/null
+  else
+    "$RA" template-open "prompt-$mode" >/dev/null
+  fi
+  wait_for "Prompt $mode" agent '^session '
+  if pane "Prompt $mode" agent | grep -Fq 'Check the team'; then fail "$mode received resume prompt"; fi
+done
+ok "resume prompt: one literal argument, idle-only, fresh/off excluded, saves/templates never accumulate it"
+
 # Default config must ignore even previously saved hub names and template metadata.
 echo 'return {}' >"$T/plain.lua"
 REX_AGENTS_CONFIG="$T/plain.lua" "$RA" status >"$T/plain-status.txt"

@@ -77,6 +77,10 @@ local function load_local_config()
   if extra.keep_missing then M.config.keep_missing = extra.keep_missing end
   if extra.notify ~= nil then M.config.notify = extra.notify end
   M.config.hub = extra.hub == true
+  if extra.resume_prompt ~= nil then
+    assert(type(extra.resume_prompt) == "string", "resume_prompt must be a string")
+    M.config.resume_prompt = extra.resume_prompt
+  end
 end
 load_local_config()
 
@@ -667,6 +671,7 @@ function M.claude_flags(args)
   local out, i, n = {}, 1, #args
   while i <= n do
     local a = args[i]
+    if a == "--" then break end -- all remaining arguments are positional prompt text
     local key = a:match("^([^=]*)")
     local has_eq = a:find("=", 1, true) ~= nil
     if C_DROP_VALUE[key] then
@@ -1023,6 +1028,20 @@ function M.hub_prefix(e)
   return ""
 end
 
+-- Only generated, interactive Claude resumes get the optional one-turn wake-up prompt.
+function M.resume_argv(e, argv)
+  local prompt = M.config.resume_prompt
+  if not M.config.hub or e.kind ~= "claude" or not M.hub_valid(e.hub_name)
+    or not prompt or prompt == "" or not argv or basename(argv[1]) ~= "claude"
+    or has(argv, "-p") or has(argv, "--print") then return argv end
+  for i = 2, #argv - 1 do
+    if argv[i] == "--resume" and argv[i + 1]:match("^%x+%-%x+%-%x+%-%x+%-%x+$") then
+      return concat(argv, { "--", prompt }) -- even a prompt starting with '-' stays positional
+    end
+  end
+  return argv
+end
+
 -- Block IDs of every pane in every session (tiled and floating), without reading the panes.
 function M.live_block_ids()
   local ids = {}
@@ -1063,8 +1082,7 @@ function M.load_snap()
   return d
 end
 
--- Serialize the watcher's full scan with launch-time map updates. Atomic rename alone would
--- still let a scan begun before a launch overwrite its new PID, or two launches lose a row.
+-- Only commit sections hold this lock; process discovery must happen outside it.
 local function with_names_lock(fn)
   mkdir(M.paths.state)
   local lock = M.paths.state .. "/names.lock"
@@ -1089,8 +1107,37 @@ local function with_names_lock(fn)
   return result
 end
 
--- Record every pane's program. Returns { panes = N } or { skipped = reason }.
-local function save()
+-- Merge publications newer than this scan. PID overlap identifies the same running agent;
+-- a new process in the same block must not inherit the old process's authority.
+function M.merge_names(scanned, current, started, live)
+  if not current or current.server ~= scanned.server then return scanned end
+  for bid, newer in pairs(current.blocks or {}) do
+    local older = scanned.blocks[bid]
+    local same = false
+    if older and older.kind == newer.kind and older.hub_name == newer.hub_name then
+      for _, a in ipairs(older.pids) do
+        for _, b in ipairs(newer.pids) do if a == b then same = true end end
+      end
+    end
+    -- Carry the publication watermark through intervening full saves too.
+    if same then older.published_at = newer.published_at end
+    if live[bid] and (newer.published_at or 0) >= started then
+      if same then
+        local seen, union = {}, {}
+        for _, list in ipairs({ newer.pids, older.pids }) do
+          for _, pid in ipairs(list) do if not seen[pid] then seen[pid] = true; union[#union + 1] = pid end end
+        end
+        newer.pids = union
+      end
+      scanned.blocks[bid] = newer
+    end
+  end
+  return scanned
+end
+
+-- Record every pane's program. Slow discovery never prevents a startup publication.
+function M.save()
+  local started = os.time()
   local old = M.load_snap()
   local server = M.server_id()
   local views = M.snapshot()
@@ -1123,25 +1170,47 @@ local function save()
     -- block not visible right now (server still starting, session hidden): keep it for a while
     if not live[bid] and now - (prev.seen or 0) < M.config.keep_missing then panes[bid] = prev end
   end
-  assign_hub_names(panes, live, old.panes)
   -- If the server stopped or restarted while we looked, programs that were dying would look like
   -- programs you exited. Keep the previous save instead.
   if server and M.server_id() ~= server then
     return { skipped = "the Rex server stopped or restarted during the scan, kept the previous save" }
   end
-  for _ in pairs(panes) do count = count + 1 end
-  if read_file(M.paths.snap) then copy_file(M.paths.snap, M.paths.prev) end
-  M.write_json(M.paths.snap, { server = server or old.server, saved_at = now, panes = panes }, "600")
-  if M.config.hub then
-    M.write_json(M.paths.names, M.names_doc(panes, pids, server, now), "600")
-  else
-    os.remove(M.paths.names) -- opting out must also revoke an earlier published map
-  end
-  return { panes = count }
-end
-
-function M.save()
-  return with_names_lock(save) or { skipped = "another save or agent publication is in progress" }
+  return with_names_lock(function()
+    local latest = M.load_snap()
+    local names
+    if M.config.hub then
+      local current = M.read_json(M.paths.names)
+      -- Recheck only concurrently published blocks, not every pane's foreground process.
+      local current_live, views_by_session = {}, {}
+      if current and current.server == server then
+        for bid, entry in pairs(current.blocks or {}) do
+          if (entry.published_at or 0) >= started then
+            local sid = entry.session_id
+            if not views_by_session[sid] then views_by_session[sid] = M.raw_view(sid) or {} end
+            for _, w in ipairs(views_by_session[sid].windows or {}) do
+              for _, layer in ipairs(w.layers or {}) do
+                for _, b in ipairs(layer.blocks or {}) do current_live[b.block_id] = true end
+              end
+            end
+            if current_live[bid] and latest.server == server and latest.panes[bid] then
+              panes[bid] = latest.panes[bid]
+              live[bid] = true
+            end
+          end
+        end
+      end
+      assign_hub_names(panes, live, latest.panes)
+      names = M.merge_names(M.names_doc(panes, pids, server, os.time()), current, started, current_live)
+    else
+      assign_hub_names(panes, live, latest.panes)
+    end
+    for _ in pairs(panes) do count = count + 1 end
+    if read_file(M.paths.snap) then copy_file(M.paths.snap, M.paths.prev) end
+    M.write_json(M.paths.snap, { server = server or old.server, saved_at = os.time(), panes = panes }, "600")
+    if names then M.write_json(M.paths.names, names, "600")
+    else os.remove(M.paths.names) end -- opting out revokes an earlier map
+    return { panes = count }
+  end) or { skipped = "another save or agent publication is in progress" }
 end
 
 -- ---- status and verify -----------------------------------------------------------------------
@@ -1217,6 +1286,7 @@ function M.status()
     return false
   end)
   return { rows = rows, saved_at = snap.saved_at, watcher = M.watcher(),
+    resume_prompt = M.config.hub and M.config.resume_prompt or nil,
     warnings = M.labelled_warnings(views, snap, matches, parents) }
 end
 
@@ -1231,6 +1301,9 @@ function M.verify(against)
     return string.format("%s / %s / %s (%s)", e.session or "?", e.window or "?", e.label or "?", bid)
   end
 
+  if M.config.hub and M.config.resume_prompt and M.config.resume_prompt ~= "" then
+    note("resume_prompt (one turn on eligible Claude restores): %s", M.quote(M.config.resume_prompt))
+  end
   local w = M.watcher()
   if w then
     if not w.loaded then err("watcher %s is not loaded (run rex-agents setup)", w.label)
@@ -1432,7 +1505,9 @@ function M.publish_started(sid, bid)
         if not v then return false end
         for _, w in ipairs(v.windows or {}) do
           for _, layer in ipairs(w.layers or {}) do
-            for _, b in ipairs(layer.blocks or {}) do if b.block_id == bid then e.label = b.label end end
+            for _, b in ipairs(layer.blocks or {}) do
+              if b.block_id == bid then e.label, e.window = b.label, w.label end
+            end
           end
         end
         e.session, e.session_id = v.label, sid
@@ -1440,17 +1515,21 @@ function M.publish_started(sid, bid)
         local done = with_names_lock(function()
           local doc = M.read_json(M.paths.names)
           if not doc or doc.server ~= server then doc = M.names_doc({}, {}, server, os.time()) end
-          local previous = M.load_snap().panes[bid] or doc.blocks[bid]
-          local live = M.live_block_ids()
-          for id in pairs(doc.blocks) do if not live[id] then doc.blocks[id] = nil end end
+          local snap = M.load_snap()
+          local previous = snap.panes[bid] or doc.blocks[bid]
           local taken = {}
           for id, entry in pairs(doc.blocks) do if id ~= bid then taken[entry.hub_name] = true end end
           local name = e._env_hub or (previous and previous.hub_name)
           if not M.hub_valid(name) or taken[name] then name = M.hub_pick(e, bid, taken) end
           e.hub_name = name
           doc.blocks[bid] = M.names_doc({ [bid] = e }, { [bid] = e._pids }, server, os.time()).blocks[bid]
+          doc.blocks[bid].published_at = os.time()
           doc.saved_at = os.time()
           if os.time() >= deadline or M.server_id() ~= server then return false end
+          e.cwd, e.seen, e.alive_on = leaf.cwd, os.time(), server
+          e._pids, e._env_hub, e._name, e._name_source = nil, nil, nil, nil
+          snap.panes[bid], snap.server = e, server
+          M.write_json(M.paths.snap, snap, "600")
           M.write_json(M.paths.names, doc, "600")
           return true
         end)
@@ -1565,6 +1644,7 @@ function M.revive_plan()
         if reason then
           skipped[#skipped + 1] = { bid = bid, label = e.label, reason = reason }
         else
+          argv = M.resume_argv(e, argv)
           local cmd = M.hub_prefix(e) .. M.join(argv)
           local line = e.cwd and (" cd " .. M.quote(e.cwd) .. " && " .. cmd) or (" " .. cmd)
           todo[#todo + 1] = { bid = bid, sid = l.sid, e = e, line = line, labelled = label, argv = argv }
@@ -1682,10 +1762,11 @@ function M.restart_notice(prev)
   return { count = n, sent = true, why = "sent: " .. M.restart_message(n) }
 end
 
-function M.revive_row(t)
+function M.revive_row(t, full)
   local e = t.e
+  local command = M.join(t.argv or e.revive)
   return string.format("%-14s %-16s %s%s%s", (e.session or ""):sub(1, 14), (e.window or ""):sub(1, 16),
-    M.join(t.argv or e.revive):sub(1, 110), M.hub_prefix(e) ~= "" and ("  [" .. e.hub_name .. "]") or "",
+    full and command or command:sub(1, 110), M.hub_prefix(e) ~= "" and ("  [" .. e.hub_name .. "]") or "",
     e.note and ("  (" .. e.note .. ")") or "")
 end
 
@@ -1854,7 +1935,14 @@ local function rex_layout(node, fresh, hub, launches)
     if M.config.hub and cmd and b.hub_name then
       local n = hub and hub(b.hub_name) or b.hub_name
       if not M.hub_valid(n) then n = M.hub_slug(n) end
-      if n ~= "" then cmd = "HUB_NAME=" .. n .. " " .. cmd end
+      if n ~= "" then
+        if not fresh and b.resume and cmd == b.resume then
+          local argv = M.split(cmd)
+          local resumed = M.resume_argv({ kind = "claude", hub_name = n }, argv)
+          if resumed ~= argv then cmd = M.join(resumed) end
+        end
+        cmd = "HUB_NAME=" .. n .. " " .. cmd
+      end
     end
     if launches then
       launches[#launches + 1] = { cmd = cmd, labelled = labelled, hold = b.hold, label = b.label }

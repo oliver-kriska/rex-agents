@@ -33,6 +33,50 @@ local flags = {
 }
 for i, c in ipairs(flags) do check("claude_flags " .. i, A.claude_flags(c[1]), c[2]) end
 
+do
+  local hub, prompt = A.config.hub, A.config.resume_prompt
+  local text = "Check the team's inbox; $(echo unsafe)"
+  local id = "11111111-2222-3333-4444-555555555555"
+  local entry = { kind = "claude", hub_name = "worker" }
+  local argv = { "claude", "--model", "sonnet", "--resume", id }
+  A.config.hub, A.config.resume_prompt = true, text
+  check("resume prompt is one literal argument", A.split(A.join(A.resume_argv(entry, argv))),
+    { "claude", "--model", "sonnet", "--resume", id, "--", text })
+  check("saved launch flags drop the injected prompt", A.claude_flags({ "--model", "sonnet", "--resume", id, "--", text }),
+    { "--model", "sonnet" })
+  check("dash-prefixed prompt cannot become a saved flag", A.claude_flags({ "--resume", id, "--", "--version" }), {})
+  check("fresh Claude gets no prompt", A.resume_argv(entry, { "claude", "--model", "sonnet" }), { "claude", "--model", "sonnet" })
+  check("Amp gets no prompt", A.resume_argv({ kind = "amp", hub_name = "worker" }, argv), argv)
+  check("invalid hub name gets no prompt", A.resume_argv({ kind = "claude", hub_name = "bad name" }, argv), argv)
+  check("invalid conversation gets no prompt", A.resume_argv(entry, { "claude", "--resume", "--model" }), { "claude", "--resume", "--model" })
+  A.config.hub = false
+  check("hub disabled gets no prompt", A.resume_argv(entry, argv), argv)
+  A.config.hub, A.config.resume_prompt = true, nil
+  check("prompt defaults off", A.resume_argv(entry, argv), argv)
+  A.config.hub, A.config.resume_prompt = hub, prompt
+end
+
+do
+  local function entry(pids, at)
+    return { kind = "claude", hub_name = "worker", pids = pids, published_at = at }
+  end
+  local scanned = { server = "s", blocks = { same = entry({ 10, 11 }), replaced = entry({ 20 }), old = entry({ 30 }) } }
+  local current = { server = "s", blocks = {
+    same = entry({ 10, 12 }, 100), replaced = entry({ 21 }, 101), old = entry({ 31 }, 99),
+    unseen = entry({ 40 }, 102), closed = entry({ 50 }, 102),
+  } }
+  local merged = A.merge_names(scanned, current, 100, { same = true, replaced = true, old = true, unseen = true })
+  check("same-second publication wins and unions same agent PIDs", merged.blocks.same.pids, { 10, 12, 11 })
+  check("replacement never inherits old PID", merged.blocks.replaced.pids, { 21 })
+  check("older publication loses to scan", merged.blocks.old.pids, { 30 })
+  check("new unseen live block survives", merged.blocks.unseen.pids, { 40 })
+  check("closed publication is dropped", merged.blocks.closed, nil)
+  local next_scan = A.merge_names({ server = "s", blocks = { same = entry({ 10, 12 }) } }, merged, 103, { same = true })
+  check("publication watermark survives intervening saves", next_scan.blocks.same.published_at, 100)
+  local other = A.merge_names({ server = "other", blocks = {} }, current, 100, { unseen = true })
+  check("other server publication is ignored", other.blocks.unseen, nil)
+end
+
 local quotes = {
   { "abc", "abc" }, { "a b", "'a b'" }, { "it's", "'it'\"'\"'s'" }, { "", "''" }, { "--x=y", "--x=y" },
   { "~/p", "'~/p'" }, { "a$b", "'a$b'" }, { "ü", "'ü'" }, { "/x/y-z_1.2@3%4+5=6:7,8", "/x/y-z_1.2@3%4+5=6:7,8" },
@@ -266,11 +310,11 @@ do
   local saved, original = {}, {}
   for k, v in pairs(A) do saved[k] = v end
   for k, v in pairs(rex) do original[k] = v end
-  local actions, panes, writes, closed, asked = {}, {}, {}, 0, {}
+  local actions, panes, writes, closed, asked, saves = {}, {}, {}, 0, {}, 0
   rex.action = function(action) actions[action.name] = action.run end
   rex.bind = function() end
   rex.session = { new_layer = function(spec) panes[#panes + 1] = spec.layout.block.options.command; return {} end }
-  A.save = function() end
+  A.save = function() saves = saves + 1 end
   A.revive_plan = function() return { todo = { { bid = "b", e = { kind = "amp" } } }, services = {} } end
   A.template_names = function() return { "demo", "other" } end
   A.view = function() return { label = "Demo", windows = { { window_id = "w", label = "Work" } } } end
@@ -303,6 +347,7 @@ do
   answers = { { "b" } }
   actions.revive_agents(ctx)
   check("native selection runs noninteractive CLI", panes[1], { "/test/rex-agents", "revive", "--only", "b", "--linger" })
+  check("native revive never waits for a full save", saves, 0)
   answers = { "demo", "fresh" }
   actions.open_project(ctx)
   check("fresh mode passed to CLI", panes[2], { "/test/rex-agents", "template-open", "demo", "--linger", "--fresh" })

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Scan outside `names.lock` and merge concurrent startup publications at commit time, retaining
+  newer live names, PIDs and restore commands. Native revive uses the last save without a full scan first.
+- Add opt-in `resume_prompt` for hub-enabled Claude conversation restores, a temporary waiter
+  recovery request costing one turn per restored session. Never retain the prompt in saved commands.
 - Use native Rex prompts for action-launched revive, template selection/mode, park confirmation
   and template names on server preview.21+. Preserve legacy fallbacks; cancellation never starts work.
 - Add `revive --only` for explicit selections and remember the last opened template privately.
