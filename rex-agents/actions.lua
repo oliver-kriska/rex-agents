@@ -68,25 +68,28 @@ return function(opts)
   end
 
   local function save_template(ctx, args, whole_session)
+    A().reload_config()
     local wid
     if not whole_session then
       wid = window_of(ctx)
       if not wid then error("can't tell which tab this is", 0) end
     end
     local name = args and args.name ~= "" and args.name or nil
-    local v = A().view(ctx.session_id)
-    if not v then error("session not found", 0) end
     if not name then
+      local v = A().view(ctx.session_id)
+      if not v then error("session not found", 0) end
       local fallback
       name, fallback = prompt("input", { title = "Save " .. (whole_session and "session" or "tab") .. " as template",
         value = A().template_default_name(v, wid), confirm = "Save" }, function()
-          local r = A().template_save(ctx.session_id, nil, wid, v)
+          local r = A().template_save(ctx.session_id, nil, wid)
           return { saved = r.saved, windows = r.windows }
         end)
       if name == nil then return fallback end
       if not name:match("%S") then return end
     end
-    local r = A().template_save(ctx.session_id, name, wid, v)
+    -- The prompt can stay open while tabs/panes change or the session disappears.
+    -- template_save reads and validates the current view, including the original tab ID.
+    local r = A().template_save(ctx.session_id, name, wid)
     return { saved = r.saved, windows = r.windows }
   end
 
@@ -95,6 +98,7 @@ return function(opts)
     keywords = "restore resume revive restart reboot claude amp",
     description = "Lists the saved agents whose panes are now empty shells; enter retypes their commands",
     run = function(ctx)
+      A().reload_config()
       local function fallback() floating(ctx, "revive", { "revive", "--save-first", "--pick", "--pause" }) end
       if not has_ui() then return fallback() end
       -- Use the watcher snapshot: a full save can take longer than the action's budget.
@@ -113,6 +117,7 @@ return function(opts)
     keywords = "template project session new start",
     description = "Pick a template from ~/.config/rex/templates and open it as a new session",
     run = function(ctx)
+      A().reload_config()
       local function fallback() floating(ctx, "projects", { "template-open", "--pick" }) end
       if not has_ui() then return fallback() end
       local items = {}
@@ -149,6 +154,7 @@ return function(opts)
     keywords = "park close template save later continue resume",
     description = "Saves this session as a template that continues its conversations, then asks to close it",
     run = function(ctx)
+      A().reload_config()
       if not has_ui() then return floating(ctx, "park", { "park", ctx.session_id }) end
       local v = A().view(ctx.session_id)
       if not v then error("session not found", 0) end

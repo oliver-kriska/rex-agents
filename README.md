@@ -205,6 +205,7 @@ See the [names.json contract and chief client rules](docs/names-json.md).
 ## Configuration reference
 
 Missing keys keep their defaults; lists extend defaults and maps merge by key.
+Config edits apply on the watcher's next save and the next palette action, without restarting either. Invalid edits keep the last good config and log a warning; one-shot CLI commands still reject a broken config.
 
 | Local config key | Default | Meaning |
 | --- | --- | --- |

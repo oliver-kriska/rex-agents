@@ -6,7 +6,8 @@ local here = debug.getinfo(1, "S").source:match("^@?(.*)/[^/]+$") or "."
 package.path = here .. "/../?.lua;" .. package.path
 local A = require("rex-agents.core")
 
-local fails, n = 0, 0
+-- Rex can retain a stale scalar upvalue after a caught error; keep the shared counters in a table.
+local results = { fails = 0, n = 0 }
 local function eq(a, b)
   if type(a) ~= type(b) then return false end
   if type(a) ~= "table" then return a == b end
@@ -15,11 +16,74 @@ local function eq(a, b)
   return true
 end
 local function check(name, got, want)
-  n = n + 1
+  results.n = results.n + 1
   if not eq(got, want) then
-    fails = fails + 1
+    results.fails = results.fails + 1
     print("FAIL " .. name .. "\n  got:  " .. rex.json.encode(got) .. "\n  want: " .. rex.json.encode(want))
   end
+end
+
+-- Reload from a private file; classification and subprocess env requests must follow it.
+do
+  local tmp = assert(A.exec({ "mktemp", "-d" })).stdout:gsub("%s+$", "")
+  local path, snap, real_exec, real_print = A.paths.config, A.paths.snap, rex.exec, print
+  A.paths.config, A.paths.snap = tmp .. "/config.lua", tmp .. "/panes.json"
+  local logs, wanted = {}, {}
+  _G.print = function(message)
+    if tostring(message):find("keeping last good config", 1, true) then logs[#logs + 1] = message else real_print(message) end
+  end
+  rex.exec = function(argv, opts)
+    if argv[1] ~= "osascript" then return real_exec(argv, opts) end
+    wanted = {}
+    for i, word in ipairs(argv) do if word == "--env" then wanted[#wanted + 1] = argv[i + 1] end end
+    return { ok = true, stdout = '{"42":{"argv":["btop"],"env":{"HUB_NAME":"worker"}}}' }
+  end
+  local function reload(text)
+    local f = assert(io.open(A.paths.config, "w")); f:write(text); f:close()
+    return A.reload_config()
+  end
+  local first = 'return {hub=true, viewers={"btop"}, shells={"custom-shell"}, labelled={worker={cwd_suffix="/old",cmd={"worker"}}}}'
+  reload(first)
+  check("reload classifies original labelled cwd", A.classify({ label = "worker", cwd = "/old" }).kind, "labelled")
+  local shell_set = A.SHELLS
+  check("reload rebuilds shell classification", A.classify({ fg = "custom-shell", pid = 42 }), nil)
+  check("reload rebuilds viewers", A.classify({ fg = "btop", pid = 42 }).kind, "btop")
+  check("hub reload requests environment", wanted, { "CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS", "HUB_NAME" })
+  check("unchanged config is not rebuilt", A.reload_config(), false)
+  local second = first:gsub("hub=true", "hub=false"):gsub('"/old"', '"/new"')
+  reload(second)
+  reload(second .. "\n-- another edit")
+  check("reload does not accumulate viewers or shells", { #A.config.viewers, #A.config.shells }, { 1, 8 })
+  check("reload keeps exported shell set current", { A.SHELLS == shell_set, shell_set["custom-shell"] }, { true, true })
+  check("old labelled cwd stops matching", A.classify({ label = "worker", cwd = "/old" }), nil)
+  check("new labelled cwd matches", A.classify({ label = "worker", cwd = "/new" }).kind, "labelled")
+  A.prefetch({ 42 }, true)
+  check("hub opt-out removes env request", wanted, { "CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS" })
+  for _, bad in ipairs({ 'return {', 'return {viewers={"other"}, resume_prompt=17}' }) do
+    local changed, warning = reload(bad)
+    check("invalid reload retains last good config", { changed, warning ~= nil, A.config.viewers[1] }, { false, true, "btop" })
+    A.reload_config()
+    reload(second)
+    reload(bad)
+  end
+  check("warn once per distinct bad text", #logs, 2)
+  local saved = {}
+  for _, key in ipairs({ "snapshot", "labelled_processes", "watcher", "load_snap", "labelled_warnings" }) do saved[key] = A[key] end
+  A.snapshot, A.labelled_processes, A.labelled_warnings = function() return {} end, function() return {}, {} end, function() return {} end
+  A.watcher = function() end
+  A.load_snap = function() return { panes = {} } end
+  check("status exposes reload warning", A.status().warnings[1], A.config_warning)
+  check("verify exposes reload warning", A.verify().warnings[1], A.config_warning)
+  for key, value in pairs(saved) do A[key] = value end
+  os.remove(A.paths.config)
+  check("config deletion restores defaults", A.reload_config(), true)
+  check("deletion clears additions and warning", { #A.config.viewers, #A.config.shells, A.config_warning == nil, shell_set["custom-shell"] == nil },
+    { 0, 7, true, true })
+  check("removed viewer no longer classifies", A.classify({ fg = "btop", pid = 42 }), nil)
+  rex.exec, _G.print = real_exec, real_print
+  A.paths.config, A.paths.snap = path, snap
+  A.reload_config()
+  A.exec({ "rm", "-rf", tmp })
 end
 
 local flags = {
@@ -360,6 +424,43 @@ do
   check("input names template", writes, { "My tab" })
   actions.save_session_template(ctx, { name = "explicit" })
   check("explicit name bypasses prompt", #asked, 1)
+
+  -- Keep the real template writer: assert the saved file, not just a call argument.
+  local tmp = assert(A.exec({ "mktemp", "-d" })).stdout:gsub("%s+$", "")
+  local templates = A.paths.templates
+  A.paths.templates = tmp
+  A.template_save = saved.template_save
+  A.prefetch_views = function() end
+  A.load_snap = function() return { panes = {} } end
+  A.live_hub_names = function() return {} end
+  local function view(label, cwd)
+    return { label = "Demo", windows = { { window_id = "w", label = label,
+      layout = { block_id = "b", cwd = cwd, fg = "zsh" } } } }
+  end
+  local current
+  A.view = function() return current end
+  for _, action in ipairs({ "save_session_template", "save_tab_template" }) do
+    current = view("Before", "/before")
+    rex.ui.input = function()
+      current = view("After", "/after")
+      return action
+    end
+    actions[action](ctx, {})
+    local written = A.read_json(A.template_path(action))
+    check(action .. " saves the post-prompt view", { written.windows[1].label, written.windows[1].layout.block.cwd }, { "After", "/after" })
+  end
+  for _, gone in ipairs({ "session", "tab" }) do
+    current = view("Before", "/before")
+    rex.ui.input = function()
+      current = gone == "tab" and { label = "Demo", windows = {} } or nil
+      return "gone-" .. gone
+    end
+    local ok, err = pcall(actions[gone == "tab" and "save_tab_template" or "save_session_template"], ctx, {})
+    check("closed " .. gone .. " reports not found", { ok, tostring(err):find("not found", 1, true) ~= nil }, { false, true })
+    check("closed " .. gone .. " writes no stale template", A.read_file(A.template_path("gone-" .. gone)), nil)
+  end
+  A.paths.templates = templates
+  A.exec({ "rm", "-rf", tmp })
   for k in pairs(A) do A[k] = nil end
   for k, v in pairs(saved) do A[k] = v end
   for k in pairs(rex) do rex[k] = nil end
@@ -402,5 +503,5 @@ if rex.args.templates then
   end
 end
 
-print(string.format("%d/%d passed", n - fails, n))
-if fails > 0 then rex.stop(1) end
+print(string.format("%d/%d passed", results.n - results.fails, results.n))
+if results.fails > 0 then rex.stop(1) end

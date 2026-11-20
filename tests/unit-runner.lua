@@ -20,7 +20,7 @@ rex = {
     local words = {}
     for _, arg in ipairs(argv) do words[#words + 1] = quote(arg) end
     -- Unit cases use only short-lived local tools; timeout/async behaviour belongs to e2e.
-    local result = os.execute(table.concat(words, " ") .. " <" .. quote(input) .. " >" .. quote(out) .. " 2>" .. quote(err))
+    local result = os.execute("exec " .. table.concat(words, " ") .. " <" .. quote(input) .. " >" .. quote(out) .. " 2>" .. quote(err))
     local r = { ok = result == 0 or result == true, stdout = read(out), stderr = read(err) }
     os.remove(out); os.remove(err); os.remove(input)
     return r

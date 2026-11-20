@@ -28,7 +28,7 @@ This is a bounded best-effort startup path, not a guarantee that a failed or ind
 
 Full scans discover processes **outside** `names.lock`. Only the final read/merge/write of `panes.json` and `names.json` is locked. Startup publication also saves the new pane's restore metadata, so an older scan cannot erase it. Under the lock, a scan re-reads current state and retains live entries published since its start (including the same timestamp second). Matching kind, hub name and an overlapping PID identify the same running agent: its PID lists are unioned. A replacement process does not inherit the old process's PIDs. Unseen, newly published live blocks are retained too.
 
-A busy commit is skipped; startup polling retries within its budget. An abandoned lock still expires after two minutes. Each JSON file is atomically replaced and mode 600; the two files are not a single filesystem transaction. The `HUB_NAME` prefix remains supplied. Consumers must continue validating PID ancestry.
+A busy commit is skipped; startup polling retries within its budget. Both `names.lock` and `labelled-start.lock` record the owner's PID and process start time in `owner.json`. After two minutes, a lock can be reclaimed only if that process has exited or the PID now belongs to a different process. Locks without an owner file retain the two-minute expiry; an unreadable/malformed owner or unavailable process check is left alone. Each state JSON file is atomically replaced and mode 600; the two files are not a single filesystem transaction. The `HUB_NAME` prefix remains supplied. Consumers must continue validating PID ancestry.
 
 ```json
 {

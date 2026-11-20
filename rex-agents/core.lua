@@ -36,23 +36,25 @@ M.PATH = table.concat({ HOME .. "/.local/bin", HOME .. "/.amp/bin", HOME .. "/bi
   "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin", REX_APP_BIN, os.getenv("PATH") or "" }, ":")
 
 -- Defaults; ~/.config/rex/rex-agents.local.lua (a Lua file returning a table) adds to them.
-M.config = {
-  shells = { "zsh", "-zsh", "bash", "-bash", "sh", "fish", "login" },
-  hub = false,
-  -- programs restarted with the same arguments
-  viewers = {},
-  -- panes known by label + cwd suffix, restarted with a fixed command:
-  --   labelled = { hub = { cwd_suffix = "/app", cmd = { "mix", "run", "--no-halt" } } }
-  labelled = {},
-  -- service panes known by label. Revive runs `rex do -s SESSION <action>` once per session
-  -- with an idle service pane. In templates each label's command is the string given, or
-  -- the running program's arguments when the value is `true`.
-  services = { labels = {}, action = nil },
-  -- seconds a saved pane whose block is gone is kept (server still starting, session hidden)
-  keep_missing = 7 * 86400,
-  -- after a server restart, one macOS notification saying how many panes revive can bring back
-  notify = true,
-}
+local function default_config()
+  return {
+    shells = { "zsh", "-zsh", "bash", "-bash", "sh", "fish", "login" },
+    hub = false,
+    -- programs restarted with the same arguments
+    viewers = {},
+    -- panes known by label + cwd suffix, restarted with a fixed command:
+    --   labelled = { hub = { cwd_suffix = "/app", cmd = { "mix", "run", "--no-halt" } } }
+    labelled = {},
+    -- service panes known by label. Revive runs `rex do -s SESSION <action>` once per session
+    -- with an idle service pane. In templates each label's command is the string given, or
+    -- the running program's arguments when the value is `true`.
+    services = { labels = {}, action = nil },
+    -- seconds a saved pane whose block is gone is kept (server still starting, session hidden)
+    keep_missing = 7 * 86400,
+    -- after a server restart, one macOS notification saying how many panes revive can bring back
+    notify = true,
+  }
+end
 
 local function set_of(list)
   local s = {}
@@ -60,33 +62,76 @@ local function set_of(list)
   return s
 end
 
-local function load_local_config()
-  local f = io.open(M.paths.config, "r")
-  if not f then return end
-  f:close()
-  local ok, extra = pcall(dofile, M.paths.config)
-  if not ok then error("rex-agents config " .. M.paths.config .. ": " .. tostring(extra), 0) end
-  if type(extra) ~= "table" then return end
-  for _, v in ipairs(extra.viewers or {}) do table.insert(M.config.viewers, v) end
-  for _, v in ipairs(extra.shells or {}) do table.insert(M.config.shells, v) end
-  for k, v in pairs(extra.labelled or {}) do M.config.labelled[k] = v end
-  if extra.services then
-    for k, v in pairs(extra.services.labels or {}) do M.config.services.labels[k] = v end
-    if extra.services.action then M.config.services.action = extra.services.action end
-  end
-  if extra.keep_missing then M.config.keep_missing = extra.keep_missing end
-  if extra.notify ~= nil then M.config.notify = extra.notify end
-  M.config.hub = extra.hub == true
-  if extra.resume_prompt ~= nil then
-    assert(type(extra.resume_prompt) == "string", "resume_prompt must be a string")
-    M.config.resume_prompt = extra.resume_prompt
-  end
-end
-load_local_config()
-
-local SHELLS = set_of(M.config.shells)
-local VIEWERS = set_of(M.config.viewers)
+local SHELLS, VIEWERS = {}, {}
+local ENV_WANTED = { "CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS" }
+local proc_cache = {}
 M.SHELLS = SHELLS
+
+local function config_text()
+  local f = io.open(M.paths.config, "r")
+  if not f then return nil end
+  local text = f:read("*a")
+  f:close()
+  return text
+end
+
+local function build_config(text)
+  local config = default_config()
+  if text then
+    local chunk = assert((loadstring or load)(text, "@" .. M.paths.config))
+    local extra = chunk()
+    if type(extra) == "table" then
+      for _, v in ipairs(extra.viewers or {}) do table.insert(config.viewers, v) end
+      for _, v in ipairs(extra.shells or {}) do table.insert(config.shells, v) end
+      for k, v in pairs(extra.labelled or {}) do config.labelled[k] = v end
+      if extra.services then
+        for k, v in pairs(extra.services.labels or {}) do config.services.labels[k] = v end
+        if extra.services.action then config.services.action = extra.services.action end
+      end
+      if extra.keep_missing then config.keep_missing = extra.keep_missing end
+      if extra.notify ~= nil then config.notify = extra.notify end
+      config.hub = extra.hub == true
+      if extra.resume_prompt ~= nil then
+        assert(type(extra.resume_prompt) == "string", "resume_prompt must be a string")
+        config.resume_prompt = extra.resume_prompt
+      end
+    end
+  end
+  return config, set_of(config.shells), set_of(config.viewers)
+end
+
+local function apply_config(config, shells, viewers)
+  M.config = config
+  for k in pairs(SHELLS) do SHELLS[k] = nil end
+  for k in pairs(VIEWERS) do VIEWERS[k] = nil end
+  for k, v in pairs(shells) do SHELLS[k] = v end
+  for k, v in pairs(viewers) do VIEWERS[k] = v end
+  ENV_WANTED[2] = config.hub and "HUB_NAME" or nil
+  proc_cache = {} -- cached environments may have been collected with a different allowlist
+  M.config_warning = nil
+end
+
+local last_text, bad_texts = config_text(), {}
+-- Initial loading remains strict, including for one-shot CLI commands.
+do
+  local ok, config, shells, viewers = pcall(build_config, last_text)
+  if not ok then error("rex-agents config " .. M.paths.config .. ": " .. tostring(config), 0) end
+  apply_config(config, shells, viewers)
+end
+
+function M.reload_config()
+  local text = config_text()
+  if text == last_text then return false, M.config_warning end
+  last_text = text
+  local valid, next_config, next_shells, next_viewers = pcall(build_config, text)
+  if not valid then
+    M.config_warning = "rex-agents config " .. M.paths.config .. ": " .. tostring(next_config) .. "; keeping last good config"
+    if not bad_texts[text] then print(M.config_warning); bad_texts[text] = true end
+    return false, M.config_warning
+  end
+  apply_config(next_config, next_shells, next_viewers)
+  return true
+end
 
 -- ---- small helpers ---------------------------------------------------------------------------
 
@@ -472,9 +517,6 @@ end
 -- HUB_NAME; the rest of a process's environment is never read or stored.
 local HERE = (debug.getinfo(1, "S").source:match("^@?(.*)/[^/]+$")) or "."
 local PROCARGS = HERE .. "/procargs.js"
-local ENV_WANTED = { "CLAUDE_CODE_RELAUNCH_RESUME_HINT_FLAGS" }
-if M.config.hub then ENV_WANTED[#ENV_WANTED + 1] = "HUB_NAME" end
-local proc_cache = {}
 
 function M.prefetch(pids, keep)
   if not keep then proc_cache = {} end
@@ -1082,27 +1124,72 @@ function M.load_snap()
   return d
 end
 
--- Only commit sections hold this lock; process discovery must happen outside it.
-local function with_names_lock(fn)
+local function process_start(pid)
+  local r = exec({ "/bin/ps", "-p", tostring(pid), "-o", "lstart=" }, { env = { LC_ALL = "C" } })
+  if r and r.ok and trim(r.stdout) ~= "" then return trim(r.stdout) end
+  -- ps exits unsuccessfully with no output for a PID that no longer exists.
+  if r and not r.ok and r.stdout == "" and r.stderr == "" then return false end
+  return nil -- unavailable is not proof that the owner died
+end
+
+local function lock_stat(path)
+  -- Also used for cleanup after the publication subprocess budget has expired.
+  local r = rex.exec({ "/usr/bin/stat", "-f", "%i %m", path }, { timeout = 1 })
+  if not r or not r.ok then return nil end
+  local inode, modified = r.stdout:match("^(%d+) (%d+)")
+  return inode, tonumber(modified)
+end
+
+local function release_lock(lock)
+  if lock.inode and lock_stat(lock.path) == lock.inode and read_file(lock.path .. "/owner.json") == lock.owner then
+    os.remove(lock.path .. "/owner.json")
+    rex.exec({ "/bin/rmdir", lock.path }, { timeout = 1 }) -- never remove unrelated contents
+  end
+end
+
+local function acquire_lock(name)
   mkdir(M.paths.state)
-  local lock = M.paths.state .. "/names.lock"
-  local r = exec({ "mkdir", lock })
+  local path = M.paths.state .. "/" .. name
+  local r = exec({ "mkdir", path })
   if not r or not r.ok then
-    local st = exec({ "/usr/bin/stat", "-f", "%m", lock })
-    local modified = st and st.ok and tonumber(st.stdout)
-    if modified and os.time() - modified >= 120 then
-      exec({ "rmdir", lock })
-      r = exec({ "mkdir", lock })
+    local inode, modified = lock_stat(path)
+    if not modified or os.time() - modified < 120 then return nil end
+    local raw = read_file(path .. "/owner.json")
+    if not raw then
+      local exists = exec({ "test", "-e", path .. "/owner.json" })
+      if not exists or exists.ok then return nil end -- unreadable is not a legacy ownerless lock
     end
+    if raw then
+      local ok, owner = pcall(rex.json.decode, raw)
+      if not ok or type(owner) ~= "table" or type(owner.pid) ~= "number" or owner.pid <= 0
+        or owner.pid % 1 ~= 0 or type(owner.started) ~= "string" or owner.started == "" then return nil end
+      local started = process_start(owner.pid)
+      if started == nil or started == owner.started then return nil end
+    end
+    release_lock({ path = path, inode = inode, owner = raw })
+    r = exec({ "mkdir", path })
   end
   if not r or not r.ok then return nil end
-  local owner = rex.exec({ "/usr/bin/stat", "-f", "%i", lock }, { timeout = 1 })
+  local lock = { path = path, inode = lock_stat(path) }
+  local ok, err = pcall(function()
+    -- The subprocess's parent is the Rex process executing this Lua, not the terminal shell.
+    local p = exec({ "/bin/sh", "-c", "printf '%s\\n' \"$PPID\"" })
+    local pid = p and p.ok and tonumber(p.stdout)
+    local started = pid and process_start(pid)
+    if not lock.inode or not started then error("cannot identify lock owner", 0) end
+    M.write_json(path .. "/owner.json", { pid = pid, started = started }, "600")
+  end)
+  lock.owner = read_file(path .. "/owner.json")
+  if not ok then release_lock(lock); error(err, 0) end
+  return lock
+end
+
+-- Only commit sections hold this lock; process discovery must happen outside it.
+local function with_names_lock(fn)
+  local lock = acquire_lock("names.lock")
+  if not lock then return nil end
   local ok, result = pcall(fn)
-  -- Cleanup must still run after the launch-time subprocess budget is exhausted.
-  local current = rex.exec({ "/usr/bin/stat", "-f", "%i", lock }, { timeout = 1 })
-  if owner and owner.ok and current and current.ok and owner.stdout == current.stdout then
-    rex.exec({ "/bin/rmdir", lock }, { timeout = 1 })
-  end
+  release_lock(lock)
   if not ok then error(result, 0) end
   return result
 end
@@ -1285,9 +1372,11 @@ function M.status()
     for i = 1, 4 do if ka[i] ~= kb[i] then return ka[i] < kb[i] end end
     return false
   end)
+  local warnings = M.labelled_warnings(views, snap, matches, parents)
+  if M.config_warning then warnings[#warnings + 1] = M.config_warning end
   return { rows = rows, saved_at = snap.saved_at, watcher = M.watcher(),
     resume_prompt = M.config.hub and M.config.resume_prompt or nil,
-    warnings = M.labelled_warnings(views, snap, matches, parents) }
+    warnings = warnings }
 end
 
 -- Check panes.json, the watcher and (with AGAINST, a copy of panes.json taken before a change)
@@ -1301,6 +1390,7 @@ function M.verify(against)
     return string.format("%s / %s / %s (%s)", e.session or "?", e.window or "?", e.label or "?", bid)
   end
 
+  if M.config_warning then warn("%s", M.config_warning) end
   if M.config.hub and M.config.resume_prompt and M.config.resume_prompt ~= "" then
     note("resume_prompt (one turn on eligible Claude restores): %s", M.quote(M.config.resume_prompt))
   end
@@ -1584,23 +1674,10 @@ function M.start_command(sid, bid, text, label, hold, agent)
     return ok, label .. ": launch not confirmed within 10s; continuing"
   end
   if not label then return start() end
-  mkdir(M.paths.state)
-  local lock = M.paths.state .. "/labelled-start.lock"
-  local r = exec({ "mkdir", lock })
-  if r and not r.ok then
-    local st = exec({ "/usr/bin/stat", "-f", "%m", lock })
-    local modified = st and st.ok and tonumber(st.stdout)
-    if modified and os.time() - modified >= 120 then
-      exec({ "rmdir", lock }) -- only an empty lock directory; never delete state recursively
-      r = exec({ "mkdir", lock })
-    end
-  end
-  if not r or not r.ok then return nil, "labelled launch locked: " .. lock end
-  local owner = exec({ "/usr/bin/stat", "-f", "%i", lock })
+  local lock = acquire_lock("labelled-start.lock")
+  if not lock then return nil, "labelled launch locked: " .. M.paths.state .. "/labelled-start.lock" end
   local ok, result, detail = pcall(start)
-  local current = exec({ "/usr/bin/stat", "-f", "%i", lock })
-  -- A long readiness wait may outlive the lease; do not remove a replacement owner's lock.
-  if owner and owner.ok and current and current.ok and owner.stdout == current.stdout then exec({ "rmdir", lock }) end
+  release_lock(lock)
   if not ok then return nil, tostring(result) end
   return result, detail
 end

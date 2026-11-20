@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Apply config edits on the next watcher save and palette action without restarting; invalid edits retain the last good config and warn once per bad text.
+- Save templates from the current session/tab after the name prompt, rejecting sessions or tabs closed while the prompt was open.
+- Protect expired names and labelled-launch locks while their owner is alive; compare PID and process start time before reclaiming them.
 - Scan outside `names.lock` and merge concurrent startup publications at commit time, retaining
   newer live names, PIDs and restore commands. Native revive uses the last save without a full scan first.
 - Add opt-in `resume_prompt` for hub-enabled Claude conversation restores, a temporary waiter

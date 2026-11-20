@@ -22,6 +22,7 @@ URL="unix://$SOCK"
 REX=${REX_BIN:-$(command -v rex || echo "$HOME/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex")}
 SERVER_PID=
 EXTRA_PID=
+WATCH_PID=
 
 rx() { "$REX" --autostart=false -S "$URL" "$@"; }
 fail() { echo "FAIL: $*"; exit 1; }
@@ -43,7 +44,13 @@ stop_extra() {
   fi
   EXTRA_PID=
 }
-cleanup() { stop_extra; stop_server; rm -f "$SOCK" "$HUB_SOCK"; rm -rf "$T"; }
+stop_watch() {
+  [ -n "$WATCH_PID" ] || return 0
+  kill -TERM "$WATCH_PID" 2>/dev/null || true
+  wait "$WATCH_PID" 2>/dev/null || true
+  WATCH_PID=
+}
+cleanup() { stop_watch; stop_extra; stop_server; rm -f "$SOCK" "$HUB_SOCK"; rm -rf "$T"; }
 trap cleanup EXIT INT TERM
 
 # ---- environment: fakes first on PATH, private dirs, a zsh that reads none of your rc files
@@ -103,6 +110,69 @@ wait_for() { # wait_for SESSION LABEL REGEX
 
 start_server
 echo "# $("$REX" version | head -1)"
+
+# Exercise both public lock users with real OS process identities, without any pane writes.
+cat >"$T/locks.lua" <<'EOF'
+package.path = rex.args.root .. "/?.lua;" .. package.path
+local A = require("rex-agents.core")
+local function run(argv)
+  local r = assert(A.exec(argv)); assert(r.ok, r.stderr); return (r.stdout:gsub("%s+$", ""))
+end
+local pid = tonumber(run({ "/bin/sh", "-c", "printf '%s\n' \"$PPID\"" }))
+local started = run({ "/usr/bin/env", "LC_ALL=C", "/bin/ps", "-p", tostring(pid), "-o", "lstart=" }):gsub("^%s+", "")
+local dead = tonumber(run({ "/bin/sh", "-c", "printf '%s\n' \"$$\"" }))
+A.snapshot = function() return { { windows = {} } } end
+A.config.hub = false
+A.config.labelled.lock_test = { ready = false }
+A.pane_state = function() return "idle" end
+A.labelled_running = function() return nil end
+local lock, entered
+local function inside()
+  entered = true
+  local owner = assert(A.read_json(lock .. "/owner.json"))
+  assert(owner.pid == pid and owner.started == started, "lock records the wrong process identity")
+  assert(run({ "/usr/bin/stat", "-f", "%Lp", lock .. "/owner.json" }) == "600")
+end
+local write = A.write_json
+A.write_json = function(path, ...)
+  if path == A.paths.snap then inside() end
+  return write(path, ...)
+end
+rex.block.call = function() inside(); return true end
+for _, name in ipairs({ "names.lock", "labelled-start.lock" }) do
+  lock = A.paths.state .. "/" .. name
+  for _, case in ipairs({ "live", "dead", "reused", "legacy", "fresh", "malformed" }) do
+    run({ "mkdir", lock })
+    if case == "live" or case == "dead" or case == "reused" or case == "fresh" then
+      write(lock .. "/owner.json", { pid = case == "dead" and dead or pid,
+        started = case == "reused" and "old process start time" or started }, "600")
+    elseif case == "malformed" then
+      write(lock .. "/owner.json", { pid = pid }, "600")
+    end
+    if case ~= "fresh" then run({ "touch", "-t", "200001010000", lock }) end
+    local before = A.read_file(lock .. "/owner.json")
+    entered = false
+    if name == "names.lock" then
+      local r = A.save()
+      assert(entered and r.panes == 0 or not entered and r.skipped, "incorrect save result")
+    else
+      local r, err = A.start_command("unused", "unused", "never typed", "lock_test", true)
+      assert(entered and r == true or not entered and err:find("locked"), "incorrect launch result")
+    end
+    local blocked = case == "live" or case == "fresh" or case == "malformed"
+    assert(entered ~= blocked, name .. ": incorrect expiry for " .. case)
+    if blocked then
+      assert(A.read_file(lock .. "/owner.json") == before, "changed a protected owner")
+      os.remove(lock .. "/owner.json")
+      run({ "rmdir", lock })
+    else
+      assert(not A.exec({ "test", "-d", lock }).ok, "successful operation leaked lock")
+    end
+  end
+end
+EOF
+rx 'do' "$T/locks.lua" root="$ROOT" >/dev/null
+ok "both locks: live owners protected, dead/reused PIDs and legacy locks expire, owner identity and cleanup checked"
 
 # ---- fixture
 cat > "$T/fixture.lua" <<EOF
@@ -823,6 +893,41 @@ PLAIN=$(rx ls --json | jq -r '.sessions[] | select(.label == "Plain") | .session
 REX_AGENTS_CONFIG="$T/plain.lua" "$RA" template-save "$PLAIN" plain >/dev/null
 if grep -q hub_name "$T/templates/plain.json"; then fail "hub metadata saved without opt-in"; fi
 ok "hub opt-out: commands, status, verify, revive, templates and names.json"
+
+# The same watcher process must observe edits, survive bad text, and recover after repair.
+mkdir "$T/reload-state"
+echo 'return {notify=false, labelled={plain={cwd_suffix="/not-matching",cmd={"never-started"}}}}' >"$T/reload.lua"
+REX_AGENTS_STATE="$T/reload-state" REX_AGENTS_CONFIG="$T/reload.lua" \
+  "$REX" --autostart=false -S "$URL" 'do' "$ROOT/rex-agents/watch.lua" --all interval=1 soon=1 >"$T/reload-watch.log" 2>&1 &
+WATCH_PID=$!
+RPANES="$T/reload-state/panes.json"
+i=0; until [ -f "$RPANES" ]; do
+  i=$((i + 1)); [ "$i" -lt 100 ] || { cat "$T/reload-watch.log"; fail "reload watcher did not start"; }; sleep 0.2
+done
+jq -e '[.panes[] | select(.label == "plain" and .kind == "labelled")] | length == 0' "$RPANES" >/dev/null || fail "initial reload classification"
+sed 's@/not-matching@/plain@' "$T/reload.lua" >"$T/reload-next.lua"
+mv "$T/reload-next.lua" "$T/reload.lua"
+i=0; until jq -e '[.panes[] | select(.label == "plain" and .kind == "labelled")] | length > 0' "$RPANES" >/dev/null; do
+  i=$((i + 1)); [ "$i" -lt 100 ] || { cat "$T/reload-watch.log"; fail "watcher retained old cwd_suffix"; }; sleep 0.2
+done
+echo 'return {resume_prompt=23}' >"$T/reload.lua"
+i=0; until grep -q 'keeping last good config' "$T/reload-watch.log"; do
+  i=$((i + 1)); [ "$i" -lt 100 ] || fail "bad config warning missing"; sleep 0.2
+done
+SAVED=$(jq '.saved_at' "$RPANES")
+i=0; until [ "$(jq '.saved_at' "$RPANES")" -gt "$SAVED" ]; do
+  i=$((i + 1)); [ "$i" -lt 100 ] || fail "bad config stopped watcher saves"; sleep 0.2
+done
+jq -e '[.panes[] | select(.label == "plain" and .kind == "labelled")] | length > 0' "$RPANES" >/dev/null || fail "bad reload lost good config"
+[ "$(grep -c 'keeping last good config' "$T/reload-watch.log")" -eq 1 ] || fail "bad config warning repeated"
+if REX_AGENTS_CONFIG="$T/reload.lua" "$RA" status >"$T/bad-cli.txt" 2>&1; then fail "one-shot CLI accepted bad config"; fi
+echo 'return {notify=false}' >"$T/reload.lua"
+i=0; until jq -e '[.panes[] | select(.label == "plain" and .kind == "labelled")] | length == 0' "$RPANES" >/dev/null; do
+  i=$((i + 1)); [ "$i" -lt 100 ] || fail "watcher failed to recover after config repair"; sleep 0.2
+done
+kill -0 "$WATCH_PID" || fail "watcher restarted or exited"
+stop_watch
+ok "watcher reload: same PID, changed classification, bad config retained/warned once, repair applied; CLI stays strict"
 
 "$REX" --autostart=false -S "$URL" 'do' "$ROOT/tests/unit.lua" >"$T/unit.txt" || { cat "$T/unit.txt"; fail "unit tests"; }
 tail -1 "$T/unit.txt"

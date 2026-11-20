@@ -30,6 +30,7 @@ end
 
 local last
 local function save(why)
+  A.reload_config()
   local ok, r = pcall(A.save)
   local stamp = os.date("%Y-%m-%d %H:%M:%S")
   if not ok then
