@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Use native Rex prompts for action-launched revive, template selection/mode, park confirmation
+  and template names on server preview.21+. Preserve legacy fallbacks; cancellation never starts work.
+- Add `revive --only` for explicit selections and remember the last opened template privately.
+- Publish agent PIDs to names.json immediately after managed launches, with bounded polling,
+  relaunched-child detection and serialization against concurrent saves. Keep HUB_NAME prefixes.
 - Cancel revive when Enter is pressed with no selected rows. Make service actions selectable,
   including services-only plans, instead of starting them implicitly.
 - Exclude Amp `--execute=…` one-shot jobs from recovery.

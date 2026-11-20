@@ -4,3 +4,4 @@ read_globals = { "rex" }
 max_line_length = 180
 
 files["tests/unit-runner.lua"] = { globals = { "rex" } }
+files["tests/unit.lua"] = { globals = { "rex" } }

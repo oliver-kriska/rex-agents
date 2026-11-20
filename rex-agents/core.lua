@@ -29,6 +29,7 @@ M.paths.prev = M.paths.state .. "/panes.prev.json"
 M.paths.pending = M.paths.state .. "/pending.json"
 M.paths.names = M.paths.state .. "/names.json"
 M.paths.notified = M.paths.state .. "/notified.json"
+M.paths.last_template = M.paths.state .. "/last-template.json"
 
 local REX_APP_BIN = HOME .. "/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS"
 M.PATH = table.concat({ HOME .. "/.local/bin", HOME .. "/.amp/bin", HOME .. "/bin", "/opt/homebrew/bin",
@@ -85,11 +86,17 @@ M.SHELLS = SHELLS
 
 -- ---- small helpers ---------------------------------------------------------------------------
 
+local exec_deadline
 local function exec(argv, opts)
   opts = opts or {}
   opts.env = opts.env or {}
   opts.env.PATH = opts.env.PATH or M.PATH
   opts.timeout = opts.timeout or 30
+  if exec_deadline then
+    local remaining = exec_deadline - os.time()
+    if remaining <= 0 then error("agent publication deadline reached", 0) end
+    opts.timeout = math.min(opts.timeout, remaining)
+  end
   return rex.exec(argv, opts)
 end
 M.exec = exec
@@ -297,9 +304,14 @@ function M.write_json(path, data, mode)
   mkdir(dir)
   local tmp = string.format("%s.tmp-%d-%d", path, os.time(), math.random(1, 1e9))
   local f = assert(io.open(tmp, "w"))
+  if mode then
+    local ok, r = pcall(exec, { "chmod", mode, tmp })
+    if not ok or not r or not r.ok then
+      f:close(); os.remove(tmp); error("cannot protect state file " .. path, 0)
+    end
+  end
   f:write(M.encode(data), "\n")
   f:close()
-  if mode then exec({ "chmod", mode, tmp }) end
   local ok, err = os.rename(tmp, path)
   if not ok then os.remove(tmp); error(err, 0) end
 end
@@ -1033,6 +1045,12 @@ function M.live_hub_names(snap)
   for bid, e in pairs(snap) do
     if live[bid] and AGENT_KINDS[e.kind] and e.hub_name then taken[e.hub_name] = true end
   end
+  local ok, names = pcall(M.read_json, M.paths.names)
+  if ok and names and names.server == M.server_id() then
+    for bid, e in pairs(names.blocks or {}) do
+      if live[bid] and M.hub_valid(e.hub_name) then taken[e.hub_name] = true end
+    end
+  end
   return taken
 end
 
@@ -1045,8 +1063,34 @@ function M.load_snap()
   return d
 end
 
+-- Serialize the watcher's full scan with launch-time map updates. Atomic rename alone would
+-- still let a scan begun before a launch overwrite its new PID, or two launches lose a row.
+local function with_names_lock(fn)
+  mkdir(M.paths.state)
+  local lock = M.paths.state .. "/names.lock"
+  local r = exec({ "mkdir", lock })
+  if not r or not r.ok then
+    local st = exec({ "/usr/bin/stat", "-f", "%m", lock })
+    local modified = st and st.ok and tonumber(st.stdout)
+    if modified and os.time() - modified >= 120 then
+      exec({ "rmdir", lock })
+      r = exec({ "mkdir", lock })
+    end
+  end
+  if not r or not r.ok then return nil end
+  local owner = rex.exec({ "/usr/bin/stat", "-f", "%i", lock }, { timeout = 1 })
+  local ok, result = pcall(fn)
+  -- Cleanup must still run after the launch-time subprocess budget is exhausted.
+  local current = rex.exec({ "/usr/bin/stat", "-f", "%i", lock }, { timeout = 1 })
+  if owner and owner.ok and current and current.ok and owner.stdout == current.stdout then
+    rex.exec({ "/bin/rmdir", lock }, { timeout = 1 })
+  end
+  if not ok then error(result, 0) end
+  return result
+end
+
 -- Record every pane's program. Returns { panes = N } or { skipped = reason }.
-function M.save()
+local function save()
   local old = M.load_snap()
   local server = M.server_id()
   local views = M.snapshot()
@@ -1094,6 +1138,10 @@ function M.save()
     os.remove(M.paths.names) -- opting out must also revoke an earlier published map
   end
   return { panes = count }
+end
+
+function M.save()
+  return with_names_lock(save) or { skipped = "another save or agent publication is in progress" }
 end
 
 -- ---- status and verify -----------------------------------------------------------------------
@@ -1356,9 +1404,73 @@ function M.wait_ready(label)
   return label .. ": readiness timed out waiting for " .. (path or "running check") .. "; continuing"
 end
 
+-- Template/pending commands may prefix the executable with environment assignments.
+function M.agent_command(text)
+  local words = M.split(text or "")
+  for _, word in ipairs(words) do
+    if not word:match("^[%a_][%w_]*=") then
+      local name = basename(word)
+      return name == "claude" or name == "amp"
+    end
+  end
+  return false
+end
+
+-- Publish just this launch, not a full (potentially slow) scan of every session. The watcher
+-- still reconciles the complete map. Fresh process reads avoid caching the shell's old argv.
+-- Nine wall-clock seconds leave a margin for filesystem writes within the 10s target.
+function M.publish_started(sid, bid)
+  if not M.config.hub then return end
+  local deadline = os.time() + 9
+  local function publish()
+    repeat
+      local leaf = leaf_info(sid, bid, {})
+      M.prefetch(leaf.pid and { leaf.pid } or {})
+      local e = M.classify(leaf)
+      if e and AGENT_KINDS[e.kind] then
+        local v = M.raw_view(sid)
+        if not v then return false end
+        for _, w in ipairs(v.windows or {}) do
+          for _, layer in ipairs(w.layers or {}) do
+            for _, b in ipairs(layer.blocks or {}) do if b.block_id == bid then e.label = b.label end end
+          end
+        end
+        e.session, e.session_id = v.label, sid
+        local server = M.server_id()
+        local done = with_names_lock(function()
+          local doc = M.read_json(M.paths.names)
+          if not doc or doc.server ~= server then doc = M.names_doc({}, {}, server, os.time()) end
+          local previous = M.load_snap().panes[bid] or doc.blocks[bid]
+          local live = M.live_block_ids()
+          for id in pairs(doc.blocks) do if not live[id] then doc.blocks[id] = nil end end
+          local taken = {}
+          for id, entry in pairs(doc.blocks) do if id ~= bid then taken[entry.hub_name] = true end end
+          local name = e._env_hub or (previous and previous.hub_name)
+          if not M.hub_valid(name) or taken[name] then name = M.hub_pick(e, bid, taken) end
+          e.hub_name = name
+          doc.blocks[bid] = M.names_doc({ [bid] = e }, { [bid] = e._pids }, server, os.time()).blocks[bid]
+          doc.saved_at = os.time()
+          if os.time() >= deadline or M.server_id() ~= server then return false end
+          M.write_json(M.paths.names, doc, "600")
+          return true
+        end)
+        if done then return true end
+      end
+      if os.time() >= deadline or not rex.sleep then return false end
+      rex.sleep(0.2)
+    until false
+  end
+  exec_deadline = deadline
+  local ok, result = pcall(publish)
+  exec_deadline = nil
+  if not ok or not result then
+    return "agent PID publication unconfirmed within 10s; watcher will retry" .. (not ok and (": " .. tostring(result)) or "")
+  end
+end
+
 -- Serialize labelled launches while they start. Expire abandoned locks after two minutes;
 -- an unconfirmed launch warns but must not block every subsequent labelled launch indefinitely.
-function M.start_command(sid, bid, text, label, hold)
+function M.start_command(sid, bid, text, label, hold, agent)
   local function start()
     local deadline = os.time() + 10
     local state = M.pane_state(sid, bid)
@@ -1376,6 +1488,7 @@ function M.start_command(sid, bid, text, label, hold)
       return block_call(sid, "write", { block_id = bid, data = text })
     end
     local ok, err = M.type_if_idle(sid, bid, text, 0)
+    if ok and agent and not label then return ok, M.publish_started(sid, bid) end
     if not ok or not label then return ok, err end
     local config = M.config.labelled[label]
     local ready = config.ready
@@ -1424,7 +1537,7 @@ function M.revive_plan()
       for _, leaf in ipairs(M.leaves(w.layout)) do live[leaf.block_id] = { sid = v.session_id, leaf = leaf } end
     end
   end
-  local todo, services, seen_sid, skipped = {}, {}, {}, {}
+  local todo, services, seen_sid, skipped, service_entries = {}, {}, {}, {}, {}
   local service_panes = 0
   for bid, e in pairs(snap.panes) do
     local l = live[bid]
@@ -1435,6 +1548,7 @@ function M.revive_plan()
           if not seen_sid[l.sid] then
             seen_sid[l.sid] = true
             services[#services + 1] = l.sid
+            service_entries[l.sid] = e
           end
         end
       elseif SHELLS[l.leaf.fg] and e.revive and #e.revive > 0 then
@@ -1466,7 +1580,57 @@ function M.revive_plan()
     return false
   end)
   table.sort(services)
-  return { todo = todo, services = services, service_panes = service_panes, skipped = skipped }
+  return { todo = todo, services = services, service_panes = service_panes, skipped = skipped,
+    service_entries = service_entries }
+end
+
+-- Service actions are session-wide, not individual pane commands. Keep their selector IDs
+-- distinct so neither picker nor --only pretends to offer per-pane service control.
+function M.revive_items(plan)
+  local items = {}
+  for _, t in ipairs(plan.todo) do
+    items[#items + 1] = { id = t.bid, title = (t.e.session or "") .. " › " .. (t.e.label or t.e.window or "pane"),
+      subtitle = home_tilde(t.e.cwd), detail = t.e.kind, icon = t.labelled and "server" or "terminal", selected = true }
+  end
+  for _, sid in ipairs(plan.services) do
+    local e = (plan.service_entries or {})[sid] or {}
+    items[#items + 1] = { id = "services:" .. sid, title = (e.session or sid) .. " › services (whole session)",
+      subtitle = home_tilde(e.cwd), detail = "service", icon = "server", selected = true }
+  end
+  return items
+end
+
+-- nil selects everything; an empty string selects nothing. Unknown IDs never broaden selection.
+function M.revive_selection(plan, only)
+  local chosen = {}
+  if only ~= nil then
+    for id in only:gmatch("[^,]+") do chosen[id] = true end
+  else
+    for _, t in ipairs(plan.todo) do chosen[t.bid] = true end
+    for _, sid in ipairs(plan.services) do chosen["services:" .. sid] = true end
+  end
+  return chosen
+end
+
+function M.revive(plan, chosen, report)
+  local function start(t)
+    if not chosen[t.bid] then return end
+    local ok, err = M.start_command(t.sid, t.bid, t.line, t.labelled, false, AGENT_KINDS[t.e.kind])
+    if not ok then
+      report("skipped: " .. (t.e.session or "") .. " / " .. (t.e.window or "") .. ": " .. tostring(err))
+    else
+      report("started: " .. (t.e.session or "") .. " / " .. (t.e.window or "") .. " → " .. M.join(t.argv):sub(1, 80))
+      if err then report("warning: " .. err) end
+    end
+  end
+  for _, t in ipairs(plan.todo) do if t.labelled then start(t) end end
+  for _, sid in ipairs(plan.services) do
+    if chosen["services:" .. sid] then
+      local out, err = M.run_services(sid)
+      report("services: " .. tostring(out or err):sub(1, 200))
+    end
+  end
+  for _, t in ipairs(plan.todo) do if not t.labelled then start(t) end end
 end
 
 -- ---- notice after a server restart ------------------------------------------------------------
@@ -1608,7 +1772,25 @@ function M.template_names()
     end
   end
   table.sort(out)
+  local ok, last = pcall(M.read_json, M.paths.last_template)
+  if ok and type(last) == "table" then
+    for i, name in ipairs(out) do
+      if name == last.name then table.remove(out, i); table.insert(out, 1, name); break end
+    end
+  end
   return out
+end
+
+function M.template_default_name(v, window_id)
+  if not window_id then return v.label end
+  for _, w in ipairs(v.windows) do
+    if w.window_id == window_id then
+      local name = w.label or v.label
+      if not is_default_window_label(name) then return name end
+      for _, leaf in ipairs(M.leaves(w.layout)) do if leaf.cwd then return basename(leaf.cwd) end end
+      return v.label
+    end
+  end
 end
 
 -- Save a session (or one window of it) as ~/.config/rex/templates/NAME.json.
@@ -1625,16 +1807,7 @@ function M.template_save(sid, name, window_id, v)
     error("session " .. tostring(v.label or sid) .. " has no tiled panes to save", 0)
   end
   if not name or name == "" then
-    if window_id == nil then
-      name = v.label
-    else
-      name = wins[1].label or v.label
-      if is_default_window_label(name) then
-        local cwd
-        for _, l in ipairs(M.leaves(wins[1].layout)) do if l.cwd then cwd = l.cwd; break end end
-        name = cwd and basename(cwd) or v.label
-      end
-    end
+    name = M.template_default_name(v, window_id)
   end
   local old_blocks = {}
   local okt, old = pcall(M.read_json, M.template_path(name))
@@ -1744,12 +1917,13 @@ function M.template_open(name, fresh)
       for j, launch in ipairs(list) do
         if launch.cmd and (launch.labelled ~= nil) == labelled_first then
           local ok, detail = M.start_command(r.session_id, r.initial_windows[i].block_ids[j],
-            launch.cmd, launch.labelled, launch.hold)
+            launch.cmd, launch.labelled, launch.hold, M.agent_command(launch.cmd))
           if detail then r.messages[#r.messages + 1] = (launch.label or "pane") .. ": " .. (ok and "warning: " or "skipped: ") .. detail end
         end
       end
     end
   end
+  M.write_json(M.paths.last_template, { name = M.slug(name) }, "600")
   return r
 end
 
@@ -1836,7 +2010,7 @@ function M.start_pending(name)
         else
           if o.labelled and o.staged == false then o.cmd = M.join(M.config.labelled[o.labelled].cmd) end
           local text = o.staged == false and o.cmd or ""
-          ok, detail = M.start_command(s.session_id, o.new, text, o.labelled)
+          ok, detail = M.start_command(s.session_id, o.new, text, o.labelled, false, M.agent_command(o.cmd))
         end
         o.error, o.warning = nil, nil
         if not ok then o.error = tostring(detail); left[#left + 1] = o

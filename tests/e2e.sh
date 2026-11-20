@@ -61,6 +61,11 @@ EOF
 ln -s "$ROOT/rex-agents" "$T/cfg/rex-agents"
 cat > "$T/cfg/init.lua" <<EOF
 require("rex-agents.actions"){ bin = "$ROOT/bin/rex-agents" }
+rex.action{ name = "e2e_ui_probe", title = "e2e ui probe", run = function()
+  if not rex.ui then return { reason = "missing" } end
+  local _, reason = rex.ui.pick{ title = "Test", items = { { id = "ok", title = "OK" } } }
+  return { reason = reason }
+end }
 rex.action{ name = "e2e_services", title = "e2e services", run = function(ctx)
   local f = io.open("$T/services.txt", "a"); f:write(ctx.session_id, "\n"); f:close()
   local e = io.open("$T/events.txt", "a"); e:write("services\n"); e:close()
@@ -75,7 +80,7 @@ return {
   services = { labels = { iex = "iex -S mix phx.server" }, action = "e2e_services" },
 }
 EOF
-unset REX_SESSION REX_BLOCK REX_CLIENT
+unset REX_SESSION REX_BLOCK REX_CLIENT HUB_NAME
 export ZDOTDIR="$T/zdot" PATH="$T/bin:$PATH" REX_SERVER="$URL" REX_AGENTS_SERVER="$URL" \
   REX_AGENTS_STATE="$T/agents" REX_AGENTS_TEMPLATES="$T/templates" REX_AGENTS_CLAUDE_SESSIONS="$T/claude" \
   REX_AGENTS_CONFIG="$T/local.lua" FAKE_AMP_DIR="$T/amp" REX_AGENTS_WATCH_LABEL=- FAKE_EVENTS="$T/events.txt"
@@ -160,7 +165,7 @@ ok "hub names: session name, label, block id, collisions, env"
 # ---- status: started by hand, so only the pane started with HUB_NAME has it
 st() { "$RA" status --json | jq -r --arg s "$1" --arg l "$2" '[.panes[] | select(.session == $s and .label == $l)][0].state'; }
 [ "$(st "Hub Names" envd)" = ok ] || fail "status: envd runs with its name"
-[ "$(st Proj mgr)" = "restart pending" ] || fail "status: mgr is restart pending"
+[ "$(st Proj mgr)" = "restart pending" ] || { "$RA" status; fail "status: mgr is restart pending"; }
 [ "$("$RA" status --json | jq '[.panes[]] | length')" = 12 ] || fail "status lists agents, labelled and services"
 "$RA" status --json | jq -e '[.panes[] | select(.session_id == null or .block_id == null)] | length == 0' >/dev/null || fail "status rows carry session and block ids"
 "$RA" status | grep -q "running agent(s) have no HUB_NAME yet" || fail "status footer"
@@ -260,6 +265,23 @@ picker_done
 [ "$(cat "$T/events.txt")" = services ] || fail "selecting the service row must run only that action"
 [ "$("$RA" revive --dry-run | grep -vc '^services:')" = 11 ] || fail "service selection started an unselected agent"
 : >"$T/events.txt"
+UI_REASON=$(rx 'do' -s "$CONTROL" e2e_ui_probe | jq -r .reason)
+case "$UI_REASON" in missing|no_client) ;; *) fail "unexpected headless UI reason: $UI_REASON" ;; esac
+rx 'do' -s "$CONTROL" revive_agents >/dev/null
+PICKER=$(bid_of "$CONTROL" revive)
+wait_for "$CONTROL" revive 'revive>'
+rx send-key -s "$CONTROL" -b "$PICKER" esc
+wait_for "$CONTROL" revive 'press any key'
+rx send-key -s "$CONTROL" -b "$PICKER" space
+[ ! -s "$T/events.txt" ] || fail "native fallback cancellation started work"
+ok "action falls back to real fzf with UI reason $UI_REASON"
+"$RA" revive --only '' >/dev/null
+"$RA" revive --only block:unknown >/dev/null
+[ ! -s "$T/events.txt" ] || fail "empty/unknown --only started work"
+PROJ_ID=$(rx ls --json | jq -r '.sessions[] | select(.label == "Proj") | .session_id')
+"$RA" revive --only "services:$PROJ_ID" >/dev/null
+[ "$(cat "$T/events.txt")" = services ] || fail "--only service selector started an agent"
+: >"$T/events.txt"
 rx kill "$CONTROL"
 ok "picker: empty selection and Escape do nothing; services are explicitly selectable"
 
@@ -277,7 +299,26 @@ sleep 1
 ok "revive re-checks each pane: a nested shell is skipped"
 
 # ---- (b) revive everything
-"$RA" revive >"$T/revive.txt"
+STAMP=$(python3 -c 'import time; print(time.monotonic())')
+AMP_BID=$(bid_of Proj amp)
+"$RA" revive --only "$AMP_BID,services:$PROJ_ID" >"$T/revive.txt"
+assert_published() { # SESSION LABEL, measured from STAMP set before the launch CLI
+  local bid pid
+  bid=$(bid_of "$1" "$2")
+  pid=$(rx block call -s "$1" -b "$bid" process | jq -r .foreground.pid)
+  python3 - "$T/agents/names.json" "$bid" "$pid" "$STAMP" <<'PY'
+import json, sys, time, os
+path, bid, pid, start = sys.argv[1:]
+with open(path) as f:
+    entry = json.load(f)['blocks'].get(bid)
+assert entry and int(pid) in entry['pids'], (bid, pid, entry)
+elapsed = time.monotonic() - float(start)
+assert elapsed < 10, elapsed
+assert os.stat(path).st_mode & 0o777 == 0o600
+print(f'ok - immediate names.json: {elapsed:.3f}s from CLI invocation (includes plan + verification), pid {pid}')
+PY
+}
+assert_published Proj amp
 [ "$(grep -c '^started:' "$T/revive.txt")" = 1 ] || { cat "$T/revive.txt"; fail "expected the skipped pane to start now"; }
 grep -q "^services:" "$T/revive.txt" || fail "services action"
 wait_for Proj mgr "argv: \[--dangerously-load-development-channels\] \[server:amp-bridge\] \[--resume\]"
@@ -343,6 +384,8 @@ wait_for "Park Me" thread "argv: \[threads\] \[continue\] \[T-"
 wait_for "Park Me" busy "^hub=busy$"
 "$RA" template-open park-me | grep -q "already open" || fail "already-open guard"
 ok "(c) park + reopen: conversations continue, same hub names"
+[ "$(jq -r .name "$T/agents/last-template.json")" = park-me ] || fail "last-used template not saved"
+[ "$(stat -f %Lp "$T/agents/last-template.json")" = 600 ] || fail "last-used template must be private"
 
 # ---- templates keep hand-written cmd/hold
 PROJ=$(rx ls --json | jq -r '.sessions[] | select(.label == "Proj") | .session_id')
@@ -411,7 +454,9 @@ BWIN=$(rx window ls -s "$BRK" --json | jq -r '.windows[0].window_id')
 "$RA" tab-to-session "$BRK" "$BWIN" Moved >/dev/null
 wait_for Moved brk "claude --model opus --resume "
 pane Moved brk | grep -q "^FAKE" && fail "tab-to-session must type the command, not run it"
+STAMP=$(python3 -c 'import time; print(time.monotonic())')
 "$RA" start-pending Moved | grep -q "^started brk" || fail "start-pending output"
+assert_published Moved brk
 wait_for Moved brk "argv: \[--model\] \[opus\] \[--resume\]"
 jq -e '.Moved == null' "$T/agents/pending.json" >/dev/null || fail "start-pending clears what it started"
 ok "tab-to-session + start-pending: typed into session.create blocks, then run"
@@ -592,7 +637,7 @@ local A = require("rex-agents.core")
 assert(not A.labelled_running("socket_hub"), "stale socket marked running")
 assert(A.wait_ready("socket_hub"):find("timed out"), "stale socket marked ready")
 EOF
-REX_AGENTS_CONFIG="$T/socket-path.lua" rx 'do' "$T/stale.lua" >/dev/null
+(REX_AGENTS_CONFIG="$T/socket-path.lua"; export REX_AGENTS_CONFIG; rx 'do' "$T/stale.lua" >/dev/null) # subshell: sh keeps assignments made before a function call
 jq '.name = "SocketRestart"' "$T/templates/socket-hub.json" >"$T/templates/socket-restart.json"
 # Fresh locks refuse a launch; abandoned ones recover without manual intervention.
 mkdir "$T/agents/labelled-start.lock"
@@ -615,6 +660,60 @@ REX_AGENTS_CONFIG="$T/unconfirmed.lua" "$RA" template-open unconfirmed >"$T/sock
 grep -q 'launch not confirmed within 10s' "$T/socket.txt" || { cat "$T/socket.txt"; fail "unconfirmed launch warning"; }
 [ ! -d "$T/agents/labelled-start.lock" ] || fail "unconfirmed launch leaked lock"
 ok "unconfirmed wrapper launch warns and releases lock"
+
+# No watcher or save call: startup publication must find the relaunched child's PID itself.
+mkdir -p "$T/slow-bin"
+cat >"$T/slow-bin/claude" <<EOF
+#!/bin/sh
+sleep "\${FAKE_START_DELAY:-2}"
+exec "$T/bin/claude" "\$@"
+EOF
+chmod +x "$T/slow-bin/claude"
+jq -n --arg cwd "$T/w/plain" --arg cmd "FAKE_RELAUNCH=1 '$T/slow-bin/claude'" \
+  '{name:"Immediate",windows:[{layout:{block:{label:"agent",cwd:$cwd,cmd:$cmd}}}]}' >"$T/templates/immediate.json"
+STAMP=$(python3 -c 'import time; print(time.monotonic())')
+"$RA" template-open immediate >"$T/immediate.txt"
+assert_published Immediate agent
+IB=$(bid_of Immediate agent)
+jq -e --arg b "$IB" '.blocks[$b].pids | length == 2' "$N" >/dev/null || fail "immediate publication omitted relaunched child"
+CHILD=$(jq -r --arg b "$IB" '.blocks[$b].pids[1]' "$N")
+ps -o comm= -p "$CHILD" | grep -q claude || fail "published child is not running"
+jq --arg cmd "FAKE_START_DELAY=12 '$T/slow-bin/claude'" '.name = "Slow" | .windows[0].layout.block.cmd = $cmd' \
+  "$T/templates/immediate.json" >"$T/templates/slow.json"
+STAMP=$(python3 -c 'import time; print(time.monotonic())')
+"$RA" template-open slow >"$T/slow.txt"
+python3 - "$STAMP" <<'PY'
+import sys, time
+elapsed = time.monotonic() - float(sys.argv[1])
+assert 7 < elapsed < 10, elapsed
+print(f'ok - unmatched agent returned in {elapsed:.3f}s; watcher retry warning follows')
+PY
+grep -q 'agent PID publication unconfirmed within 10s; watcher will retry' "$T/slow.txt" || fail "missing publication timeout warning"
+SB=$(bid_of Slow agent)
+jq -e --arg b "$SB" '.blocks[$b] == null' "$N" >/dev/null || fail "unconfirmed launch published a PID"
+
+# Publication must not wait for conversation metadata: an MCP client can start before it exists.
+jq '.name = "No Metadata" | .windows[0].layout.block.cmd = "FAKE_SESSION_DELAY=12 claude"' \
+  "$T/templates/immediate.json" >"$T/templates/no-metadata.json"
+STAMP=$(python3 -c 'import time; print(time.monotonic())')
+"$RA" template-open no-metadata >/dev/null
+assert_published "No Metadata" agent
+
+# Concurrent launches and watcher-style saves must not overwrite each other's new rows.
+for suffix in A B; do
+  jq --arg name "Concurrent $suffix" '.name = $name' "$T/templates/immediate.json" >"$T/templates/concurrent-$suffix.json"
+done
+STAMP=$(python3 -c 'import time; print(time.monotonic())')
+"$RA" template-open concurrent-A >"$T/concurrent-A.txt" &
+LAUNCH_A=$!
+"$RA" template-open concurrent-B >"$T/concurrent-B.txt" &
+LAUNCH_B=$!
+for _ in 1 2 3 4; do "$RA" save >/dev/null; sleep 0.2; done
+wait "$LAUNCH_A"
+wait "$LAUNCH_B"
+assert_published "Concurrent A" agent
+assert_published "Concurrent B" agent
+[ ! -d "$T/agents/names.lock" ] || fail "publication leaked its lock"
 
 # Default config must ignore even previously saved hub names and template metadata.
 echo 'return {}' >"$T/plain.lua"

@@ -22,8 +22,9 @@ https://github.com/user-attachments/assets/59f85a04-6293-4381-8673-1e98ec55dafc
 
 ## Requirements
 
-- macOS and Rex **0.1.0-preview.18 or newer**; tested on preview.18 (API 13) and preview.20 (API 16).
-- **fzf** for pickers; Homebrew installs it with rex-agents. Clone users: `brew install fzf`.
+- macOS and Rex **0.1.0-preview.18 or newer**; tested on preview.18 (API 13), preview.20 (API 16) and preview.21 (API 18).
+- Native prompts need **Rex server preview.21+** and a compatible connected app. Older servers use floating terminal pickers.
+- **fzf** for terminal/fallback pickers; Homebrew installs it with rex-agents. Clone users: `brew install fzf`.
 - Claude Code and/or Amp installed and available to your shell for agent recovery.
 - macOS tools `ps`, `lsof`, `osascript` and `/usr/bin/nc` (normally already present).
 
@@ -73,8 +74,8 @@ Put that PATH line in your shell startup file too. Setup does not change PATH, a
 1. Install, reload config, and run Claude Code or Amp normally in a tiled pane.
 2. Run `rex-agents save`, then `rex-agents status` and `rex-agents verify`.
 3. After a Rex server restart, wait for your restored panes to reach empty shell prompts.
-4. Press **⌘⇧B**: **Tab** toggles a row, **Enter** starts selected rows, **Esc** cancels. All rows start selected.
-5. Read the results, then press any key to dismiss the floating pane.
+4. Press **⌘⇧B**. All rows start selected; toggle the programs you want, then **⌘Return** confirms the native picker. **Esc** cancels.
+5. Results appear briefly in a floating pane. In the terminal fallback, **Tab** toggles, **Enter** confirms, and any key dismisses results.
 
 For one recognised agent, output looks like this (captured on a private test server with a fake agent; save age varies):
 
@@ -97,22 +98,22 @@ A normal installation also shows watcher health: `watcher: running (pid N)` in s
 
 ### Bring programs back after a restart
 
-**⌘⇧B** saves once, then lists eligible commands in a floating terminal. Type to filter; filtering does not deselect hidden rows. Selection marks, not the cursor, determine what starts. On `main`, Enter with no rows selected cancels everything, including services. Service actions have one selectable row per session—even when they are the only work available.
+**⌘⇧B** saves once, then lists eligible programs with their session, pane/tab, directory and kind. Confirming an empty selection does nothing. Services have one selectable **whole-session action** each, not per-pane control. Older servers, unavailable clients and failed prompts fall back to the floating fzf picker; cancellation and timeout never open a fallback.
 
-Use `rex-agents revive --dry-run` to inspect the plan, or `revive --pick` for the picker in your terminal. **Plain `revive` starts all eligible commands without asking.** [Picker/output example](docs/advanced.md#picker-output).
+Use `rex-agents revive --dry-run` to inspect the plan, or `revive --pick` for fzf in your terminal. **Plain `revive` starts all eligible commands without asking.** `revive --only ID,ID` selects only those block IDs; `services:SESSION_ID` explicitly selects a whole-session service action. [Picker/output details](docs/advanced.md#picker-output).
 
 After a server restart, the watcher can send **“N panes can be brought back — press ⌘⇧B”** once. Set `notify = false` to disable it. Starting shells and labelled programs running elsewhere may be excluded; the count is a plan, not a promise. First install is not a restart.
 
 ### Park a project, then continue it later
 
 1. In a project session named **Demo**, use the palette action **Agents: Park Session (close, reopen later)**.
-2. It saves the template, warns if a detected Claude turn is busy, then asks `Close the "Demo" session now? [y/N]`. Enter **y** to close; the default leaves it open.
-3. Later, press **⌘⇧T**, select the `demo` row labelled **continue conversations**, and press Enter.
+2. It saves the template, warns if a detected Claude turn is busy, then offers **Keep open** or **Close session**. The terminal fallback asks `[y/N]` instead.
+3. Later, press **⌘⇧T**, select `demo`, then **Continue conversations**. The terminal fallback combines template and mode in one list.
 4. Switch to the new session with Rex's **⌘K**. Tabs, splits and directories return, and agents with saved resume commands continue their conversations.
 
-Choose **fresh agents** instead to start new conversations. “Continue” appears only if the template contains a resume command; a viewer-only template may offer only “fresh.” Opening a template creates a session but does not select it in the app, and refuses a duplicate session name.
+Choose **Fresh agents** instead to start new conversations. Without a saved resume command, “Continue” uses the fresh command too; fzf omits its “continue” row in that case. The last successfully opened template comes first. Opening creates a session but does not select it in the app, and refuses a duplicate session name.
 
-**Save Session as Template** and **Save Tab as Template** save without closing. Names default to the session/tab name and filenames use lowercase slugs. Templates live in `~/.config/rex/templates/`. [Template JSON, held commands and copying tabs](docs/advanced.md#templates-and-copying-tabs).
+**Save Session as Template** and **Save Tab as Template** ask for a name prefilled from the session/tab. Older servers save with that default immediately; an explicit `name` action argument skips the prompt. Filenames use lowercase slugs. Templates live in `~/.config/rex/templates/`. [Template JSON, held commands and copying tabs](docs/advanced.md#templates-and-copying-tabs).
 
 ### Inspect what can be restored
 
@@ -155,7 +156,7 @@ require("rex-agents.actions"){ keys = { revive = "cmd+shift+r", open = false } }
 | `setup [--dry-run] [--force] [--server ENDPOINT]` | Install integration; see setup rules below. |
 | `setup --uninstall [--dry-run]` | Remove integration, retain user settings/state. |
 | `save` | Record recognised tiled panes now. |
-| `revive [--pick\|--dry-run] [--save-first] [--pause]` | Restore commands; `--pause` waits for a key afterward. |
+| `revive [--pick\|--dry-run\|--only IDS] [--save-first] [--pause]` | Restore selected commands; `--pause` waits for a key afterward. |
 | `status [--json]` | Pane states, reasons, watcher health and warnings. |
 | `verify [--against FILE]` | Check state; errors cause failure, warnings do not. |
 | `template-list` | List template filename slugs. |
@@ -198,7 +199,7 @@ Use `viewers = { "btop", "lazygit" }` to replay those programs by basename and s
 Set `hub = true` to assign stable agent names and prefix restarted agent commands with `HUB_NAME`.
 This is optional; it does not install a hub. chief is a separate message-hub tool whose client can read the map.
 Already-running agents keep their environment; status adds a hub-name column.
-Each save writes private `names.json`; disabling the feature removes it on the next successful save.
+Saves and confirmed agent launches publish private `names.json`; disabling the feature removes it on the next successful save.
 See the [names.json contract and chief client rules](docs/names-json.md).
 
 ## Configuration reference
@@ -267,7 +268,7 @@ The watcher saves at startup, every 120 s and 20 s after the first event in a bu
 - Settings/templates are executable input. Review files from others; keep local commands, paths and agent IDs private. There is no argv secret-redaction layer.
 - All CLI calls use `--autostart=false`; rex-agents never stops or restarts the Rex server. Service actions remain responsible for their own safety and duplicate prevention.
 
-State lives in `~/.local/state/rex-agents/` (or `$XDG_STATE_HOME/rex-agents`): `panes.json`, `panes.prev.json`, `pending.json`, `notified.json`, optional `names.json`, and temporary `labelled-start.lock`. Templates live in `~/.config/rex/templates/`. [File purposes and lifecycle](docs/advanced.md#files-and-setup).
+State lives in `~/.local/state/rex-agents/` (or `$XDG_STATE_HOME/rex-agents`): snapshots, pending commands, notification decisions, last-used template and optional hub names. Templates live in `~/.config/rex/templates/`. [File purposes and locks](docs/advanced.md#files-and-setup).
 
 ## Contributing and tests
 

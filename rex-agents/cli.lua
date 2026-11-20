@@ -28,7 +28,7 @@ rex-agents: remember what runs in each Rex pane and bring it back.
 
   rex-agents setup [--dry-run] [--uninstall] [--force] [--server ENDPOINT]
   rex-agents save
-  rex-agents revive [--pick|--dry-run] [--save-first] [--pause]
+  rex-agents revive [--pick|--dry-run|--only IDS] [--save-first] [--pause]
   rex-agents template-save SESSION_ID [NAME] [--window WINDOW_ID]
   rex-agents template-open [NAME|--pick] [--fresh]
   rex-agents park SESSION_ID [NAME]
@@ -66,7 +66,7 @@ end
 local function positional(a)
   local out = {}
   for i = 2, #a do
-    if not a[i]:match("^%-%-") and a[i - 1] ~= "--window" then out[#out + 1] = a[i] end
+    if not a[i]:match("^%-%-") and a[i - 1] ~= "--window" and a[i - 1] ~= "--only" then out[#out + 1] = a[i] end
   end
   return out
 end
@@ -95,6 +95,14 @@ end
 
 local function cmd_revive(a)
   local pick, dry = flag(a, "--pick"), flag(a, "--dry-run") or flag(a, "--dry")
+  local only
+  for i, x in ipairs(a) do
+    if x == "--only" then
+      only = a[i + 1]
+      if only == nil or only:match("^%-%-") then error("--only requires comma-separated IDs (or an empty string)", 0) end
+    end
+  end
+  if only ~= nil and (pick or dry) then error("--only cannot be combined with --pick or --dry-run", 0) end
   if flag(a, "--save-first") then pcall(A.save) end
   local plan = A.revive_plan()
   for _, s in ipairs(plan.skipped) do print("skipped: " .. tostring(s.label) .. ": " .. s.reason) end
@@ -107,9 +115,7 @@ local function cmd_revive(a)
     for _, s in ipairs(plan.services) do print("services: rex do -s " .. s .. " " .. tostring(A.config.services.action)) end
     return
   end
-  local chosen = {}
-  for _, t in ipairs(plan.todo) do chosen[t.bid] = true end
-  for _, s in ipairs(plan.services) do chosen["services:" .. s] = true end
+  local chosen = A.revive_selection(plan, only)
   if pick then
     local rows = {}
     for _, t in ipairs(plan.todo) do rows[#rows + 1] = t.bid .. "\t" .. A.revive_row(t) end
@@ -125,25 +131,7 @@ local function cmd_revive(a)
     chosen = {}
     for _, l in ipairs(sel) do chosen[l:match("^([^\t]*)")] = true end
   end
-  local function start(t)
-    if chosen[t.bid] then
-      local ok, err = A.start_command(t.sid, t.bid, t.line, t.labelled)
-      if not ok then
-        print("skipped: " .. (t.e.session or "") .. " / " .. (t.e.window or "") .. ": " .. tostring(err))
-      else
-        print("started: " .. (t.e.session or "") .. " / " .. (t.e.window or "") .. " → " .. A.join(t.argv):sub(1, 80))
-        if err then print("warning: " .. err) end
-      end
-    end
-  end
-  for _, t in ipairs(plan.todo) do if t.labelled then start(t) end end
-  for _, s in ipairs(plan.services) do
-    if chosen["services:" .. s] then
-      local out, err = A.run_services(s)
-      print("services: " .. tostring(out or err):sub(1, 200))
-    end
-  end
-  for _, t in ipairs(plan.todo) do if not t.labelled then start(t) end end
+  A.revive(plan, chosen, print)
 end
 
 local function cmd_template_save(a)
@@ -319,4 +307,10 @@ local f = cmds[c]
 if not f then error("unknown command: " .. c, 0) end
 local ok, err = pcall(f, a)
 if flag(a, "--pause") then pause_key() end
+-- Native actions have already asked their questions. Leave output visible briefly, with no
+-- second terminal prompt. Print errors before the pane closes too.
+if flag(a, "--linger") then
+  if not ok then print(tostring(err)) end
+  rex.sleep(3)
+end
 if not ok then error(err, 0) end

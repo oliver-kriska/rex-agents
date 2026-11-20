@@ -38,6 +38,8 @@ int main(int argc, char **argv) {
     for (;;) pause();
   }
   if (strcmp(prog, "claude") == 0) {
+    const char *delay = getenv("FAKE_SESSION_DELAY");
+    if (delay) sleep((unsigned)atoi(delay));
     for (int i = 1; i + 1 < argc; i++) if (!strcmp(argv[i], "--resume")) snprintf(id, sizeof id, "%s", argv[i+1]);
     if (!id[0]) uuid(id, 1);
     const char *dir = getenv("REX_AGENTS_CLAUDE_SESSIONS");

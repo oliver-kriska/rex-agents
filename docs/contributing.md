@@ -32,9 +32,13 @@ Never test against a live work session. Run separately with `cc`, `jq`, `python3
 REX_BIN=/path/to/rex tests/e2e.sh
 ```
 
-Tested versions are **0.1.0-preview.18 (API 13)** and **0.1.0-preview.20 (API 16)**. Confirm each binary with `version` first. CI does not download Rex: no unattended, version-pinned distribution is configured.
+Tested versions are **0.1.0-preview.18 (API 13)**, **preview.20 (API 16)** and **preview.21 (API 18)**. Confirm each binary with `version` first. CI does not download Rex: no unattended, version-pinned distribution is configured.
 
 E2e starts private throwaway servers, pins every client with `--autostart=false -S`, and stops only verified test-owned PIDs with SIGTERM. It runs fake Claude/Amp programs, not real accounts, and runs the unit suite inside Rex. Cases cover save/restart/revive, actual fzf selection/cancellation, service selection, templates, readiness, duplicate guards and hub opt-in/out.
+
+Native prompt tests cover every fallback reason using registered actions. E2e verifies the real `no_client` fallback on preview.21, missing-UI fallback on older servers, `--only`, mode-600 last-used state, and immediate PID publication through revive/template-open/start-pending. Timing includes CLI invocation and verification overhead, with delayed launches, relaunched children, absent conversation metadata, timeout and concurrent-save cases.
+
+Before release, manually test on a compatible app connected **only to a test server**: native multi-select/empty selection, filtering, Escape, template Continue/Fresh, save-name editing/cancellation, and park Keep/Close with a busy-turn warning. Inspect layout and keyboard navigation. Headless tests cannot verify the app's rendering; no working session is needed or appropriate for this check.
 
 Explicit `-S` avoids preview.18's fallback to the home server when an environment-selected endpoint is unavailable (fixed upstream in preview.19). On preview.20, start-pending's `write` works on newly created blocks despite their ownership state.
 

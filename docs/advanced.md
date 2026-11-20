@@ -15,7 +15,11 @@ Use the clone installation for the current source. Upgrading a stable installati
 
 ## Picker output
 
-The revive action opens a floating terminal over the current tab. It runs `revive --save-first --pick --pause`. The list shows session, tab and command; block IDs are hidden. Agent conversation IDs can appear **inside the command**, so inspect before sharing captures. With hub enabled a row also shows `[hub-name]`.
+On server preview.21+, actions try `rex.ui` directly. Revive shows a multi-picker, all ticked, with session › pane/tab, shortened cwd and kind. ⌘Return confirms; no selection means no work. Template-open asks for a template (last-used first), then Continue/Fresh. Save actions ask for a name, and park saves before asking Close/Keep open. Cancel and timeout stop without a terminal fallback. An empty save name also cancels.
+
+Missing `rex.ui`, `unsupported`, `no_client`, `busy` and `failed` use the legacy path; failures log their detail. Revive/template-open/park fall back to the floating CLI. Save actions retain their original immediate default-name save when native input is unavailable. Native launch results remain in a floating pane for three seconds; there is no second “press any key” prompt. No native prompt runs under `pcall`, a timer or a library callback.
+
+The **terminal fallback** for revive runs `revive --save-first --pick --pause`. Its list shows session, tab and command; block IDs are hidden. Agent conversation IDs can appear **inside the command**, so inspect before sharing captures. With hub enabled a row also shows `[hub-name]`.
 
 Captured from the actual floating picker on a private server with a fake Claude process; the conversation ID is replaced below:
 
@@ -27,6 +31,8 @@ revive>
 ```
 
 All eligible rows start selected. Tab toggles a row; typing filters. Enter starts marked rows, even marked rows hidden by a filter. Esc or Enter with nothing marked cancels. Service rows read `services: Demo → start_services`, one action per session. Labelled commands launch first, followed by selected service actions, then other selected commands.
+
+For automation, `revive --only block:ID,block:OTHER` is an exact allowlist. An empty string or unknown IDs starts nothing; it cannot combine with `--pick` or `--dry-run`. Include `services:SESSION_ID` to request that session's entire configured service action. Obtain block IDs with `rex --autostart=false -S "$REX_SERVER" block ls -s SESSION_ID --json`. Both pickers share the same launch order and idle checks. Native actions run slow launches in the CLI, outside the action's execution time limit.
 
 After accepting that row:
 
@@ -155,7 +161,9 @@ The watcher saves at startup, every 120 s and 20 s after the first process/block
 | `panes.prev.json` in that directory | Previous snapshot. |
 | `pending.json` in that directory | Copied commands retained until successfully started. |
 | `notified.json` in that directory | Server instance considered for a restart notification. |
+| `last-template.json` in that directory | Last successfully opened template slug; atomic, mode 600. |
 | `names.json` in that directory | Private hub map, only with hub enabled. |
+| `names.lock` in that directory | Serialises full saves and launch-time hub map updates; abandoned locks expire after two minutes. |
 | `labelled-start.lock` in that directory | Temporary launch-serialisation directory. |
 | `~/Library/Logs/rex-agents.log` | Watcher saves, skipped saves and errors. |
 | `~/Library/LaunchAgents/com.rex-agents.watch.plist` | Watcher pinned to the setup endpoint. |

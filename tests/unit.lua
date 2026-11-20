@@ -167,7 +167,8 @@ do
   assert(made.ok, "unit temp directory")
   local tmp = made.stdout:gsub("%s+$", "")
   local saved = { snap = A.paths.snap, prev = A.paths.prev, names = A.paths.names, snapshot = A.snapshot, server_id = A.server_id,
-    legacy = A.legacy_server_id, watcher = A.watcher }
+    legacy = A.legacy_server_id, watcher = A.watcher, state = A.paths.state }
+  A.paths.state = tmp
   A.paths.snap, A.paths.prev = tmp .. "/panes.json", tmp .. "/panes.prev.json"
   A.paths.names = tmp .. "/names.json"
   A.watcher = function() return { label = "test", loaded = true, pid = 123 } end
@@ -224,8 +225,112 @@ do
 
   A.paths.snap, A.paths.prev = saved.snap, saved.prev
   A.paths.names = saved.names
+  A.paths.state = saved.state
   A.snapshot, A.server_id, A.legacy_server_id = saved.snapshot, saved.server_id, saved.legacy
   A.watcher = saved.watcher
+  A.exec({ "rm", "-rf", tmp })
+end
+
+-- Selection is an allowlist, never an implicit "all"; order is independent of picker order.
+do
+  local plan = { todo = {
+    { bid = "a", sid = "s", e = { session = "App", window = "Code", label = "worker", kind = "claude", cwd = os.getenv("HOME") .. "/app" },
+      argv = { "claude" }, line = "claude" },
+    { bid = "l", sid = "s", e = { session = "App", window = "Tools", kind = "labelled" },
+      argv = { "db" }, line = "db", labelled = "db" },
+    { bid = "b", sid = "s", e = { kind = "amp" }, argv = { "amp" }, line = "amp" },
+  }, services = { "s", "other" }, service_entries = { s = { session = "App", cwd = "/tmp/app" } } }
+  local items = A.revive_items(plan)
+  check("native agent row", { items[1].id, items[1].title, items[1].subtitle, items[1].detail, items[1].selected },
+    { "a", "App › worker", "~/app", "claude", true })
+  check("native service group", { items[4].id, items[4].title, items[4].detail },
+    { "services:s", "App › services (whole session)", "service" })
+  local start, services, calls = A.start_command, A.run_services, {}
+  A.start_command = function(_, bid) calls[#calls + 1] = bid; return true end
+  A.run_services = function(sid) calls[#calls + 1] = "services:" .. sid; return "ok" end
+  A.revive(plan, A.revive_selection(plan, "a,services:s,l,unknown"), function() end)
+  check("only selected programs in dependency order", calls, { "l", "services:s", "a" })
+  calls = {}
+  A.revive(plan, A.revive_selection(plan, ""), function() end)
+  check("empty only does nothing", calls, {})
+  A.revive(plan, A.revive_selection(plan, "unknown"), function() end)
+  check("unknown only does nothing", calls, {})
+  A.start_command, A.run_services = start, services
+  check("agent command with env", A.agent_command("HUB_NAME=worker /tmp/bin/claude --model sonnet"), true)
+  check("viewer is not an agent command", A.agent_command("tail claude"), false)
+end
+
+-- Exercise the registered actions, not just a reason classifier. A cancelled prompt must
+-- neither spawn a fallback terminal nor execute the confirmed action.
+do
+  local saved, original = {}, {}
+  for k, v in pairs(A) do saved[k] = v end
+  for k, v in pairs(rex) do original[k] = v end
+  local actions, panes, writes, closed, asked = {}, {}, {}, 0, {}
+  rex.action = function(action) actions[action.name] = action.run end
+  rex.bind = function() end
+  rex.session = { new_layer = function(spec) panes[#panes + 1] = spec.layout.block.options.command; return {} end }
+  A.save = function() end
+  A.revive_plan = function() return { todo = { { bid = "b", e = { kind = "amp" } } }, services = {} } end
+  A.template_names = function() return { "demo", "other" } end
+  A.view = function() return { label = "Demo", windows = { { window_id = "w", label = "Work" } } } end
+  A.template_save = function(_, name) writes[#writes + 1] = name or "Demo"; return { saved = "demo.json", windows = 1, name = name or "Demo" } end
+  A.busy_claude = function() return {} end
+  A.close_session = function() closed = closed + 1; return {} end
+  require("rex-agents.actions"){ bin = "/test/rex-agents" }
+  local ctx = { session_id = "s", window_id = "w" }
+  for _, reason in ipairs({ "missing", "unsupported", "no_client", "busy", "failed", "cancelled", "timeout" }) do
+    local function reject() return nil, reason, "test detail" end
+    rex.ui = reason ~= "missing" and { pick = reject, input = reject } or nil
+    panes, writes = {}, {}
+    actions.revive_agents(ctx)
+    actions.open_project(ctx)
+    actions.park_session(ctx)
+    actions.save_session_template(ctx, {})
+    local cancelled = reason == "cancelled" or reason == "timeout"
+    check("fallback terminal count: " .. reason, #panes, cancelled and 0 or 3)
+    -- Without rex.ui, park goes straight to the floating CLI (which saves there), as in v0.1.
+    local expected = (cancelled or reason == "missing") and 1 or 2
+    check("cancelled park still saved; cancelled input did not: " .. reason, #writes, expected)
+    check("fallback/cancel never closes", closed, 0)
+  end
+  local answers = { {} }
+  local function answer(fields) asked[#asked + 1] = fields; return table.remove(answers, 1) end
+  rex.ui = { pick = answer, input = answer }
+  panes = {}
+  actions.revive_agents(ctx)
+  check("confirmed empty native selection", #panes, 0)
+  answers = { { "b" } }
+  actions.revive_agents(ctx)
+  check("native selection runs noninteractive CLI", panes[1], { "/test/rex-agents", "revive", "--only", "b", "--linger" })
+  answers = { "demo", "fresh" }
+  actions.open_project(ctx)
+  check("fresh mode passed to CLI", panes[2], { "/test/rex-agents", "template-open", "demo", "--linger", "--fresh" })
+  answers = { "close" }
+  actions.park_session(ctx)
+  check("confirmed park closes", closed, 1)
+  answers, asked, writes = { "My tab" }, {}, {}
+  actions.save_tab_template(ctx, {})
+  check("input prefilled from tab", asked[1].value, "Work")
+  check("input names template", writes, { "My tab" })
+  actions.save_session_template(ctx, { name = "explicit" })
+  check("explicit name bypasses prompt", #asked, 1)
+  for k in pairs(A) do A[k] = nil end
+  for k, v in pairs(saved) do A[k] = v end
+  for k in pairs(rex) do rex[k] = nil end
+  for k, v in pairs(original) do rex[k] = v end
+end
+
+do
+  local tmp = assert(A.exec({ "mktemp", "-d" })).stdout:gsub("%s+$", "")
+  local templates, last = A.paths.templates, A.paths.last_template
+  A.paths.templates, A.paths.last_template = tmp .. "/templates", tmp .. "/last.json"
+  for _, name in ipairs({ "alpha", "beta", "gamma" }) do A.write_json(A.template_path(name), {}) end
+  A.write_json(A.paths.last_template, { name = "beta" }, "600")
+  check("last-used first, remainder alphabetical", A.template_names(), { "beta", "alpha", "gamma" })
+  A.write_json(A.paths.last_template, { name = "deleted" }, "600")
+  check("deleted last-used ignored", A.template_names(), { "alpha", "beta", "gamma" })
+  A.paths.templates, A.paths.last_template = templates, last
   A.exec({ "rm", "-rf", tmp })
 end
 

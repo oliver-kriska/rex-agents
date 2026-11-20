@@ -22,6 +22,12 @@ Status adds a hub column: `ok` means the environment matches, `restart pending` 
 
 Each enabled save writes an atomic, mode-600 `~/.local/state/rex-agents/names.json`. The state-directory overrides also affect its location.
 
+Revive, template-open and start-pending also publish a newly launched agent's PID as soon as its foreground process is recognised, without waiting for the watcher or a conversation file. The detected relaunched Claude child is included too. The startup path polls every 0.2 s with a nine-second wall-clock budget after typing Enter, caps subprocess timeouts to the remaining budget, and targets publication within **10 s per launched pane**. If it cannot confirm/publish, it reports a warning and continues; the watcher still saves 20 s after the first process event and every 120 s. Held commands and hub-disabled launches do not poll.
+
+This is a bounded best-effort startup path, not a guarantee that a failed or indefinitely slow agent starts. Rex IPC and OS scheduling can also stall beyond the polling budget. A consumer should allow at least the 10 s target and retain a retry/reconnect path, rather than assuming a row must exist on its first read. Entries can lag exits until the watcher reconciles them; always validate PID ancestry.
+
+Full scans and startup updates share `names.lock` so a concurrent save or launch cannot overwrite another launch's PID row. A busy full save is skipped; startup polling retries within its budget. An abandoned lock expires after two minutes. Names and format are unchanged; the `HUB_NAME` prefix is still supplied.
+
 ```json
 {
   "version": 1,
