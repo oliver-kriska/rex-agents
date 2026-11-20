@@ -1451,7 +1451,8 @@ function M.verify(against)
           local saved = snap.panes[leaf.block_id]
           if e and AGENT_KINDS[e.kind] and saved and saved.hub_name then
             local state = hub_state(leaf.block_id, saved.hub_name, e, names)
-            if state ~= "ok" then warn("%s: %s", where(leaf.block_id, saved), state) end
+            -- With hub_env, a missing prefix is the long-standing "restart pending" state, not a fault.
+            if state ~= "ok" and state ~= "restart pending" then warn("%s: %s", where(leaf.block_id, saved), state) end
           end
         end
       end

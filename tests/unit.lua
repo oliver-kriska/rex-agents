@@ -339,6 +339,11 @@ do
   end
   A.pane_state = function() return "busy" end
   check("opt-in missing env stays pending", A.status().rows[1].state, "restart pending")
+  local pending_warnings = {}
+  for _, w in ipairs(A.verify().warnings) do
+    if w:find("restart pending", 1, true) then pending_warnings[#pending_warnings + 1] = w end
+  end
+  check("opt-in pending is not a verify warning", pending_warnings, {})
   A.config.hub = false
   check("disabled hub ignores opt-in", A.hub_prefix(entry), "")
   A.exec({ "rm", "-rf", tmp })
