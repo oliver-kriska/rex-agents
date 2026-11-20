@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.2.0 — 2026-11-20
+
+Native Rex prompts, launch-time hub name publishing and live config reload.
+
+Upgrading with `hub = true`: launches no longer get a `HUB_NAME=` prefix; hub clients read
+names from `names.json` (chief v0.1.0-pre.11 or newer). Set `hub_env = true` to keep the prefix.
+
 - Agents started from inside an agent pane (nested claude/amp, teammates) no longer inherit the pane's hub name; they get chief's folder name (`<folder>-<harness>`). Set `hub_env = true` to keep the old prefix. This applies to newly launched, prefix-free panes; existing or manually supplied environments are unchanged.
 - Check published names and live agent PIDs in status/verify when `hub_env` is off; show publication failures as readable warnings in the floating CLI.
 - Apply config edits on the next watcher save and palette action without restarting; invalid edits retain the last good config and warn once per bad text.

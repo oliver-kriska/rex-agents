@@ -1,8 +1,8 @@
 # Releasing rex-agents
 
 The repository is both source code and a Homebrew tap. A release tag selects the source
-archive; the formula on `main` supplies its checksum. v0.1.0 is released and its checksum
-is pinned. Follow this procedure for a new version; never recreate the v0.1.0 tag.
+archive; the formula on `main` supplies its checksum. The latest release is v0.2.0 and its
+checksum is pinned. Follow this procedure for a new version; never recreate an existing tag.
 
 These are maintainer steps, not an automatic release script. Tags, pushes, releases and
 installation require the maintainer's approval. Do not run setup or tests against a live Rex
@@ -11,7 +11,7 @@ session as part of packaging validation.
 ## 1. Check the release candidate
 
 - Run the tests and linters listed in [README.md](README.md#contributing-and-tests).
-- Run `tests/e2e.sh` separately with the preview.18 and preview.20 binaries using `REX_BIN`.
+- Run `tests/e2e.sh` separately with the preview.20 and preview.21 binaries using `REX_BIN`.
   Confirm each binary with its `version` command first.
 - Wait for the candidate's GitHub Actions run to pass. E2e is local-only; CI does not install Rex.
 - Review the changelog and the release diff for private paths, state files and credentials.

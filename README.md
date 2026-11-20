@@ -28,7 +28,7 @@ https://github.com/user-attachments/assets/59f85a04-6293-4381-8673-1e98ec55dafc
 - Claude Code and/or Amp installed and available to your shell for agent recovery.
 - macOS tools `ps`, `lsof`, `osascript` and `/usr/bin/nc` (normally already present).
 
-This README describes `main`. Homebrew currently installs **v0.1.0**; its [picker and first-install differences](docs/advanced.md#v010-differences) matter until the next release.
+This README describes `main`. Homebrew installs the latest release, **v0.2.0**; see the [changelog](CHANGELOG.md) for changes on `main` since then.
 
 ## Install
 

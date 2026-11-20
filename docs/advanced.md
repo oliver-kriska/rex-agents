@@ -2,17 +2,6 @@
 
 Start with the [README](../README.md). These details describe `main`.
 
-## v0.1.0 differences
-
-Homebrew's stable formula currently installs v0.1.0, not the latest `main`:
-
-- In its revive picker, Enter with no marked rows still accepts the cursor row. Use **Esc** to cancel.
-- Its service actions are not selectable rows: accepting the picker runs them, and a services-only plan runs without a picker. On `main`, each eligible session has a selectable service row; Enter with nothing marked cancels.
-- First-install verify can report a missing `panes.json` as a problem before the watcher saves. Run `rex-agents save` with a session open, then verify again. `main` treats no initial save as information, but still checks watcher health.
-- `main` excludes Amp `--execute=…` one-shot commands as well as `-x` and `--execute`; v0.1.0 only checks the separate tokens.
-
-Use the clone installation for the current source. Upgrading a stable installation does not apply unreleased fixes.
-
 ## Picker output
 
 On server preview.21+, actions try `rex.ui` directly. Revive shows a multi-picker, all ticked, with session › pane/tab, shortened cwd and kind. ⌘Return confirms; no selection means no work. Template-open asks for a template (last-used first), then Continue/Fresh. Save actions ask for a name, and park saves before asking Close/Keep open. Cancel and timeout stop without a terminal fallback. An empty save name also cancels.
