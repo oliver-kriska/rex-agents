@@ -3,6 +3,8 @@
 return {
   -- Optional agent names for a message hub (off by default).
   -- hub = true,
+  -- Opt into the old HUB_NAME launch prefix instead of names.json-only discovery.
+  -- hub_env = true,
 
   -- Additional shell names (extends zsh, -zsh, bash, -bash, sh, fish, login).
   -- shells = { "my-shell" },

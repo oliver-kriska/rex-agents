@@ -187,7 +187,7 @@ check("layout label", fresh.split.after.block.label, "hub")
 check("has_resume", A.template_has_resume({ windows = { { layout = tpl } } }), true)
 
 -- hub names
-local configured_hub = A.config.hub
+local configured_hub, configured_hub_env = A.config.hub, A.config.hub_env
 A.config.hub = false
 check("hub disabled prefix", A.hub_prefix({ kind = "claude", hub_name = "mgr" }), "")
 check("hub disabled template", A.rex_layout({ block = { cmd = "claude", hub_name = "mgr" } }, true).block.options.initial_input, "claude\r")
@@ -201,6 +201,10 @@ A.argv = function() return { "amp", "--no-tui", "--execute-other=value" } end
 check("unrelated flag does not exclude runner", A.classify({ fg = "amp", pid = 1 }).kind, "amp-runner")
 A.argv = original_argv
 A.config.hub = true
+A.config.hub_env = false
+check("hub prefix defaults off", A.hub_prefix({ kind = "claude", hub_name = "mgr" }), "")
+check("template prefix defaults off", A.rex_layout({ block = { cmd = "amp", hub_name = "mgr" } }, true).block.options.initial_input, "amp\r")
+A.config.hub_env = true
 check("hub valid", A.hub_valid("worker-demo-2"), true)
 check("hub valid upper/dot", A.hub_valid("A.b_c-1"), true)
 check("hub invalid start", A.hub_valid("-x"), false)
@@ -234,7 +238,7 @@ check("layout hub resume", hl.split.before.block.options.initial_input, "HUB_NAM
 check("layout hub slugged + hold", hl.split.after.block.options.initial_input, "HUB_NAME=bad-name amp")
 check("layout hub renamed", A.rex_layout(htpl, true, function(name) return "p-" .. name end).split.before.block.options.initial_input,
   "HUB_NAME=p-mgr claude\r")
-A.config.hub = configured_hub
+A.config.hub, A.config.hub_env = configured_hub, configured_hub_env
 
 -- repeated flag groups from Claude Code relaunches are dropped, order kept
 check("dedupe flags", A.dedupe_flags({ "--model", "x", "--allowed-tools", "a", "--allowed-tools", "b",
@@ -267,6 +271,81 @@ check("names version", nd.version, 1)
 check("names b1", { nd.blocks.b1.hub_name, nd.blocks.b1.pids[1], nd.blocks.b1.pids[2] }, { "mgr", 10, 11 })
 check("names skips non-agents and not running", { nd.blocks.b2 == nil, nd.blocks.b4 == nil, nd.blocks.b3 ~= nil }, { true, true, true })
 
+-- Names without an environment prefix must survive launches and identify the live process.
+do
+  local saved = {}
+  for k, v in pairs(A) do saved[k] = v end
+  local tmp = assert(A.exec({ "mktemp", "-d" })).stdout:gsub("%s+$", "")
+  A.paths = { state = tmp, snap = tmp .. "/panes.json", names = tmp .. "/names.json", prev = tmp .. "/prev.json",
+    templates = tmp, last_template = tmp .. "/last.json" }
+  A.config = { hub = true, hub_env = false, labelled = {}, services = { labels = {} }, keep_missing = 100 }
+  local leaf = { block_id = "b", label = "worker", fg = "amp", pid = 42, cwd = "/tmp/project" }
+  local view = { session_id = "s", label = "Project", windows = { { label = "Work", layout = leaf } } }
+  local entry = { kind = "amp", revive = { "amp" }, hub_name = "saved-worker", session = "Project", window = "Work" }
+  local function snapshot()
+    A.write_json(A.paths.snap, { server = "instance", saved_at = os.time(), panes = { b = entry } }, "600")
+  end
+  snapshot()
+  A.snapshot = function() return { view } end
+  A.server_id = function() return "instance" end
+  A.live_block_ids = function() return { b = true } end
+  A.labelled_processes = function() return {}, {} end
+  A.labelled_warnings = function() return {} end
+  A.watcher = function() end
+  A.prefetch_views = function() end
+  local env
+  A.classify = function()
+    return { kind = "amp", revive = { "amp" }, _pids = { 42, 43 }, _env_hub = env }
+  end
+  A.pane_state = function() return "busy" end
+  local function published(name, pids)
+    A.write_json(A.paths.names, { version = 1, blocks = { b = { hub_name = name, pids = pids } } }, "600")
+  end
+  for _, case in ipairs({
+    { "missing", nil, {}, "not published" },
+    { "wrong pid", "saved-worker", { 99 }, "published for another process" },
+    { "wrong name", "other", { 42 }, "published as other" },
+    { "foreground", "saved-worker", { 42 }, "ok" },
+    { "relaunched child", "saved-worker", { 43 }, "ok" },
+  }) do
+    if case[2] then published(case[2], case[3]) else os.remove(A.paths.names) end
+    check("status publication " .. case[1], A.status().rows[1].state, case[4])
+    local warnings = A.verify().warnings
+    check("verify publication " .. case[1], case[4] == "ok" and #warnings == 0
+      or case[4] ~= "ok" and (warnings[1] or ""):find(case[4], 1, true) ~= nil, true)
+  end
+  os.remove(A.paths.names)
+  env = "saved-worker"
+  check("legacy env still works without map", A.status().rows[1].state, "ok")
+  env = "from-env"
+  check("legacy env mismatch still reported", A.status().rows[1].state, "runs as from-env")
+  A.save()
+  check("rule zero keeps running env name", A.load_snap().panes.b.hub_name, "from-env")
+  env = nil
+  snapshot()
+  A.pane_state = function() return "idle" end
+  leaf.fg = "zsh"
+  local typed = {}
+  A.type_into = function(_, _, text) typed[#typed + 1] = text; return true end
+  A.publish_started = function() end
+  for _, enabled in ipairs({ false, true }) do
+    A.config.hub_env = enabled
+    typed = {}
+    local plan = A.revive_plan()
+    local prefix = enabled and "HUB_NAME=saved-worker " or ""
+    check("revive line hub_env=" .. tostring(enabled), plan.todo[1].line, " " .. prefix .. "amp")
+    A.revive(plan, { b = true }, function() end)
+    check("start command text hub_env=" .. tostring(enabled), typed, { " " .. prefix .. "amp" })
+  end
+  A.pane_state = function() return "busy" end
+  check("opt-in missing env stays pending", A.status().rows[1].state, "restart pending")
+  A.config.hub = false
+  check("disabled hub ignores opt-in", A.hub_prefix(entry), "")
+  A.exec({ "rm", "-rf", tmp })
+  for k in pairs(A) do A[k] = nil end
+  for k, v in pairs(saved) do A[k] = v end
+end
+
 -- save: skipped when the server changes during the scan; legacy alive_on ("PID@lstart") still
 -- counts as the running server. Uses stubs, a scratch state dir, no Rex calls.
 do
@@ -281,7 +360,7 @@ do
   A.paths.names = tmp .. "/names.json"
   A.watcher = function() return { label = "test", loaded = true, pid = 123 } end
   local first = A.verify()
-  check("verify before first save is informational", { #first.errors, (first.info[2] or ""):match("^no save yet") ~= nil }, { 0, true })
+  check("verify before first save is informational", { #first.errors, table.concat(first.info, "\n"):find("no save yet", 1, true) ~= nil }, { 0, true })
   check("verify against requires current snapshot", #A.verify(tmp .. "/previous.json").errors > 0, true)
   A.watcher = function() return { label = "test", loaded = false } end
   check("missing snapshot must not hide missing watcher", A.verify().errors[1], "watcher test is not loaded (run rex-agents setup)")

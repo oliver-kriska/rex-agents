@@ -81,6 +81,7 @@ EOF
 cat > "$T/local.lua" <<EOF
 return {
   hub = true,
+  hub_env = true,
   viewers = { "btop" },
   labelled = { hub = { cwd_suffix = "/hub-live", cmd = { "$T/bin/hub-server", "start", "two words", "$T/ready" },
     ready = { path = "$T/ready", timeout = 5 } } },
@@ -732,6 +733,7 @@ grep -q 'launch not confirmed within 10s' "$T/socket.txt" || { cat "$T/socket.tx
 ok "unconfirmed wrapper launch warns and releases lock"
 
 # No watcher or save call: startup publication must find the relaunched child's PID itself.
+echo 'return {hub=true}' >"$T/no-env.lua"
 mkdir -p "$T/slow-bin"
 cat >"$T/slow-bin/claude" <<EOF
 #!/bin/sh
@@ -742,7 +744,7 @@ chmod +x "$T/slow-bin/claude"
 jq -n --arg cwd "$T/w/plain" --arg cmd "FAKE_RELAUNCH=1 '$T/slow-bin/claude'" \
   '{name:"Immediate",windows:[{layout:{block:{label:"agent",cwd:$cwd,cmd:$cmd}}}]}' >"$T/templates/immediate.json"
 STAMP=$(python3 -c 'import time; print(time.monotonic())')
-"$RA" template-open immediate >"$T/immediate.txt"
+REX_AGENTS_CONFIG="$T/no-env.lua" "$RA" template-open immediate >"$T/immediate.txt"
 assert_published Immediate agent
 IB=$(bid_of Immediate agent)
 jq -e --arg b "$IB" '.blocks[$b].pids | length == 2' "$N" >/dev/null || fail "immediate publication omitted relaunched child"
@@ -751,7 +753,7 @@ ps -o comm= -p "$CHILD" | grep -q claude || fail "published child is not running
 jq --arg cmd "FAKE_START_DELAY=12 '$T/slow-bin/claude'" '.name = "Slow" | .windows[0].layout.block.cmd = $cmd' \
   "$T/templates/immediate.json" >"$T/templates/slow.json"
 STAMP=$(python3 -c 'import time; print(time.monotonic())')
-"$RA" template-open slow >"$T/slow.txt"
+REX_AGENTS_CONFIG="$T/no-env.lua" "$RA" template-open slow >"$T/slow.txt"
 python3 - "$STAMP" <<'PY'
 import sys, time
 elapsed = time.monotonic() - float(sys.argv[1])
@@ -761,6 +763,11 @@ PY
 grep -q 'agent PID publication unconfirmed within 10s; watcher will retry' "$T/slow.txt" || fail "missing publication timeout warning"
 SB=$(bid_of Slow agent)
 jq -e --arg b "$SB" '.blocks[$b] == null' "$N" >/dev/null || fail "unconfirmed launch published a PID"
+
+# --linger is the native action's floating CLI: its warning must be a readable output line.
+jq '.name = "Slow Linger"' "$T/templates/slow.json" >"$T/templates/slow-linger.json"
+REX_AGENTS_CONFIG="$T/no-env.lua" "$RA" template-open slow-linger --linger >"$T/slow-linger.txt"
+grep -q '^agent: warning: agent PID publication unconfirmed' "$T/slow-linger.txt" || fail "floating CLI hid publication warning"
 
 # Publication must not wait for conversation metadata: an MCP client can start before it exists.
 jq '.name = "No Metadata" | .windows[0].layout.block.cmd = "FAKE_SESSION_DELAY=12 claude"' \
@@ -827,7 +834,12 @@ jq '.name = "Resume Prompt" | .windows[0].layout.block = {
   "$T/templates/immediate.json" >"$T/templates/resume-prompt.json"
 REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" template-open resume-prompt >/dev/null
 wait_for "Resume Prompt" agent '^session '
+wait_for "Resume Prompt" agent '^hub=-$'
 PB=$(bid_of "Resume Prompt" agent)
+if pane "Resume Prompt" agent | grep -q 'HUB_NAME='; then fail "default hub_env typed an env prefix"; fi
+jq -e --arg b "$PB" '.blocks[$b].hub_name == "prompt-worker"' "$N" >/dev/null || fail "no-prefix template lost requested name"
+REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" status --json | jq -e --arg b "$PB" \
+  '.hub_env == false and ([.panes[] | select(.block_id == $b)][0].state == "ok")' >/dev/null || fail "no-prefix status is not published ok"
 PSID=$(jq -r --arg b "$PB" '.blocks[$b].session_id' "$N")
 cat >"$T/prompt-argv.lua" <<EOF
 package.path = "$ROOT/?.lua;" .. package.path
@@ -855,13 +867,24 @@ for _ in 1 2; do
   sleep 0.3
   REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" revive --dry-run >"$T/prompt-plan.txt"
   grep -Fq 'Check the team' "$T/prompt-plan.txt" || fail "dry run omitted resume prompt"
+  if grep -q 'HUB_NAME=' "$T/prompt-plan.txt"; then fail "no-prefix revive plan leaked HUB_NAME"; fi
+  STAMP=$(python3 -c 'import time; print(time.monotonic())')
   REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" revive --only "$PB" >/dev/null
+  assert_published "Resume Prompt" agent
   wait_for "Resume Prompt" agent '^session '
 done
 rx 'do' "$T/prompt-argv.lua" >/dev/null
 REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" status | grep -q '^resume_prompt ' || fail "status omitted resume prompt"
 REX_AGENTS_CONFIG="$T/prompt.lua" "$RA" verify >"$T/prompt-verify.txt"
 grep -q '^resume_prompt ' "$T/prompt-verify.txt" || fail "verify omitted resume prompt"
+grep -q '^hub_env: false$' "$T/prompt-verify.txt" || fail "verify omitted hub_env setting"
+PW=$(rx window ls -s "$PSID" --json | jq -r '.windows[0].window_id')
+REX_AGENTS_CONFIG="$T/no-env.lua" "$RA" tab-to-session "$PSID" "$PW" NoEnvMoved >/dev/null
+if pane NoEnvMoved agent | grep -q 'HUB_NAME='; then fail "no-prefix staged command leaked HUB_NAME"; fi
+STAMP=$(python3 -c 'import time; print(time.monotonic())')
+REX_AGENTS_CONFIG="$T/no-env.lua" "$RA" start-pending NoEnvMoved >"$T/no-env-pending.txt"
+assert_published NoEnvMoved agent
+wait_for NoEnvMoved agent '^hub=-$'
 for mode in fresh off; do
   jq --arg name "Prompt $mode" '.name = $name' "$T/templates/resume-prompt.json" >"$T/templates/prompt-$mode.json"
   if [ "$mode" = fresh ]; then
@@ -871,8 +894,13 @@ for mode in fresh off; do
   fi
   wait_for "Prompt $mode" agent '^session '
   if pane "Prompt $mode" agent | grep -Fq 'Check the team'; then fail "$mode received resume prompt"; fi
+  if [ "$mode" = fresh ]; then
+    wait_for "Prompt $mode" agent '^hub=-$'
+    FB=$(bid_of "Prompt $mode" agent)
+    jq -e --arg b "$FB" '.blocks[$b].hub_name == "prompt-fresh-prompt-worker"' "$N" >/dev/null || fail "no-prefix template lost collision-resolved name"
+  fi
 done
-ok "resume prompt: one literal argument, idle-only, fresh/off excluded, saves/templates never accumulate it"
+ok "no-prefix resume/template/pending launches: names and collisions preserved, prompt stays literal and never accumulates"
 
 # Default config must ignore even previously saved hub names and template metadata.
 echo 'return {}' >"$T/plain.lua"

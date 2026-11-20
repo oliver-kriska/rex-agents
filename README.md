@@ -196,7 +196,7 @@ Use `viewers = { "btop", "lazygit" }` to replay those programs by basename and s
 
 ### Hub names
 
-Set `hub = true` to assign stable agent names and prefix restarted agent commands with `HUB_NAME`.
+Set `hub = true` to assign stable agent names through `names.json`, without a `HUB_NAME` launch prefix. Set `hub_env = true` too only for the old prefix-based behavior.
 This is optional; it does not install a hub. chief is a separate message-hub tool whose client can read the map.
 Already-running agents keep their environment; status adds a hub-name column.
 Saves and confirmed agent launches publish private `names.json`; disabling the feature removes it on the next successful save.
@@ -210,6 +210,7 @@ Config edits apply on the watcher's next save and the next palette action, witho
 | Local config key | Default | Meaning |
 | --- | --- | --- |
 | `hub` | `false` | Only literal `true` enables hub integration. |
+| `hub_env` | `false` | With hub enabled, opt into the old `HUB_NAME=` launch prefix. Otherwise clients resolve names through `names.json`; nested agents do not inherit a generated environment name. |
 | `resume_prompt` | `nil` (off) | With hub enabled, send one initial prompt on eligible Claude conversation restores. Costs one turn per restored session; [temporary waiter workaround](docs/names-json.md#optional-resume-prompt). |
 | `notify` | `true` | Restart notification; `false` disables it. |
 | `keep_missing` | `604800` | Seconds to retain missing panes (one week). |

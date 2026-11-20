@@ -40,6 +40,7 @@ local function default_config()
   return {
     shells = { "zsh", "-zsh", "bash", "-bash", "sh", "fish", "login" },
     hub = false,
+    hub_env = false,
     -- programs restarted with the same arguments
     viewers = {},
     -- panes known by label + cwd suffix, restarted with a fixed command:
@@ -91,6 +92,7 @@ local function build_config(text)
       if extra.keep_missing then config.keep_missing = extra.keep_missing end
       if extra.notify ~= nil then config.notify = extra.notify end
       config.hub = extra.hub == true
+      config.hub_env = extra.hub_env == true
       if extra.resume_prompt ~= nil then
         assert(type(extra.resume_prompt) == "string", "resume_prompt must be a string")
         config.resume_prompt = extra.resume_prompt
@@ -946,8 +948,8 @@ end
 
 -- ---- hub names -------------------------------------------------------------------------------
 --
--- With hub enabled, every Claude Code / Amp pane gets HUB_NAME=<name> in front of its command, a
--- name the pane keeps across restarts and revives (it owns an inbox on the hub). It is chosen once
+-- With hub enabled, every Claude Code / Amp pane gets a published name, retained across restarts
+-- and revives. Only hub_env=true also supplies HUB_NAME on launch. The name is chosen once
 -- and stored as hub_name in panes.json and in templates:
 --   0. HUB_NAME the running program already has (only if no other pane has the same one)
 --   1. the Claude Code session name, if you set it yourself (/rename): "worker demo 2" → worker-demo-2
@@ -1066,7 +1068,9 @@ end
 
 -- "HUB_NAME=<name> " for an agent entry, else "".
 function M.hub_prefix(e)
-  if M.config.hub and e and AGENT_KINDS[e.kind] and M.hub_valid(e.hub_name) then return "HUB_NAME=" .. e.hub_name .. " " end
+  if M.config.hub and M.config.hub_env and e and AGENT_KINDS[e.kind] and M.hub_valid(e.hub_name) then
+    return "HUB_NAME=" .. e.hub_name .. " "
+  end
   return ""
 end
 
@@ -1312,16 +1316,38 @@ function M.watcher()
   return { label = label, loaded = true, pid = tonumber(r.stdout:match('"PID"%s*=%s*(%d+)')) }
 end
 
+local function published_names()
+  local ok, doc = pcall(M.read_json, M.paths.names)
+  return ok and type(doc) == "table" and doc.version == 1 and type(doc.blocks) == "table" and doc.blocks or {}
+end
+
+local function hub_state(bid, name, classified, names)
+  if not name then return "not saved yet" end
+  local env_name = classified._env_hub
+  if env_name == name then return "ok" end
+  if env_name then return "runs as " .. env_name end
+  if M.config.hub_env then return "restart pending" end
+  local entry = names[bid]
+  if type(entry) ~= "table" then return "not published" end
+  if entry.hub_name ~= name then return "published as " .. tostring(entry.hub_name or "<missing name>") end
+  for _, pid in ipairs(classified._pids or {}) do
+    if has(entry.pids or {}, pid) then return "ok" end
+  end
+  return "published for another process"
+end
+
 -- One row per classified or saved pane, including missing and unresumable panes:
 -- { session, session_id, window, label, block_id, kind, hub_name, env_hub, state }. state is
---   ok               the program runs with HUB_NAME = its hub name
---   restart pending  it runs without HUB_NAME; it gets the name the next time rex-agents starts it
+--   ok               matching environment name, or published name and live PID with hub_env=false
+--   restart pending  hub_env=true but the agent runs without HUB_NAME
+--   not published / published for another process / published as NAME: map mismatch
 --   runs as NAME     it runs with another HUB_NAME (set by hand, or shared with another pane)
 --   not saved yet    started since the last save
 --   not running      the pane is an idle shell (⌘⇧B brings it back)
 -- Reads the panes and the last save; changes nothing.
 function M.status()
   local snap = M.load_snap()
+  local names = M.config.hub and published_names() or {}
   local rows, seen = {}, {}
   local views = M.snapshot()
   local matches, parents = M.labelled_processes()
@@ -1349,10 +1375,7 @@ function M.status()
           elseif pane ~= "busy" then state = "pane is " .. pane
           elseif not classified then state = "busy (different program)"
           elseif not AGENT_KINDS[e.kind] or not M.config.hub then state = "running"
-          elseif not hub then state = "not saved yet"
-          elseif env_hub == hub then state = "ok"
-          elseif env_hub then state = "runs as " .. env_hub
-          else state = "restart pending" end
+          else state = hub_state(bid, hub, classified, names) end
           rows[#rows + 1] = { session = v.label, session_id = v.session_id, window = w.label, label = leaf.label,
             block_id = bid, kind = e.kind, hub_name = hub, env_hub = env_hub, state = state, reason = reason }
         end
@@ -1375,6 +1398,7 @@ function M.status()
   local warnings = M.labelled_warnings(views, snap, matches, parents)
   if M.config_warning then warnings[#warnings + 1] = M.config_warning end
   return { rows = rows, saved_at = snap.saved_at, watcher = M.watcher(),
+    hub_env = M.config.hub and M.config.hub_env,
     resume_prompt = M.config.hub and M.config.resume_prompt or nil,
     warnings = warnings }
 end
@@ -1391,6 +1415,7 @@ function M.verify(against)
   end
 
   if M.config_warning then warn("%s", M.config_warning) end
+  if M.config.hub then note("hub_env: %s", tostring(M.config.hub_env)) end
   if M.config.hub and M.config.resume_prompt and M.config.resume_prompt ~= "" then
     note("resume_prompt (one turn on eligible Claude restores): %s", M.quote(M.config.resume_prompt))
   end
@@ -1417,6 +1442,21 @@ function M.verify(against)
   local views = M.snapshot()
   local matches, parents = M.labelled_processes()
   for _, warning in ipairs(M.labelled_warnings(views, snap, matches, parents)) do warn("%s", warning) end
+  if M.config.hub then
+    local names = published_names()
+    for _, v in ipairs(views) do
+      for _, window in ipairs(v.windows) do
+        for _, leaf in ipairs(M.leaves(window.layout)) do
+          local e = M.classify(leaf)
+          local saved = snap.panes[leaf.block_id]
+          if e and AGENT_KINDS[e.kind] and saved and saved.hub_name then
+            local state = hub_state(leaf.block_id, saved.hub_name, e, names)
+            if state ~= "ok" then warn("%s: %s", where(leaf.block_id, saved), state) end
+          end
+        end
+      end
+    end
+  end
   local count, agents, holders, no_cmd = 0, 0, {}, 0
   for bid, e in pairs(snap.panes) do
     count = count + 1
@@ -1582,7 +1622,7 @@ end
 -- Publish just this launch, not a full (potentially slow) scan of every session. The watcher
 -- still reconciles the complete map. Fresh process reads avoid caching the shell's old argv.
 -- Nine wall-clock seconds leave a margin for filesystem writes within the 10s target.
-function M.publish_started(sid, bid)
+function M.publish_started(sid, bid, requested_name)
   if not M.config.hub then return end
   local deadline = os.time() + 9
   local function publish()
@@ -1609,7 +1649,7 @@ function M.publish_started(sid, bid)
           local previous = snap.panes[bid] or doc.blocks[bid]
           local taken = {}
           for id, entry in pairs(doc.blocks) do if id ~= bid then taken[entry.hub_name] = true end end
-          local name = e._env_hub or (previous and previous.hub_name)
+          local name = e._env_hub or requested_name or (previous and previous.hub_name)
           if not M.hub_valid(name) or taken[name] then name = M.hub_pick(e, bid, taken) end
           e.hub_name = name
           doc.blocks[bid] = M.names_doc({ [bid] = e }, { [bid] = e._pids }, server, os.time()).blocks[bid]
@@ -1639,7 +1679,7 @@ end
 
 -- Serialize labelled launches while they start. Expire abandoned locks after two minutes;
 -- an unconfirmed launch warns but must not block every subsequent labelled launch indefinitely.
-function M.start_command(sid, bid, text, label, hold, agent)
+function M.start_command(sid, bid, text, label, hold, agent, hub_name)
   local function start()
     local deadline = os.time() + 10
     local state = M.pane_state(sid, bid)
@@ -1657,7 +1697,7 @@ function M.start_command(sid, bid, text, label, hold, agent)
       return block_call(sid, "write", { block_id = bid, data = text })
     end
     local ok, err = M.type_if_idle(sid, bid, text, 0)
-    if ok and agent and not label then return ok, M.publish_started(sid, bid) end
+    if ok and agent and not label then return ok, M.publish_started(sid, bid, hub_name) end
     if not ok or not label then return ok, err end
     local config = M.config.labelled[label]
     local ready = config.ready
@@ -2009,20 +2049,22 @@ local function rex_layout(node, fresh, hub, launches)
     local cmd
     if fresh then cmd = b.cmd else cmd = b.resume or b.cmd end
     local labelled = cmd and M.labelled_command(cmd)
+    local hub_name
     if M.config.hub and cmd and b.hub_name then
       local n = hub and hub(b.hub_name) or b.hub_name
       if not M.hub_valid(n) then n = M.hub_slug(n) end
       if n ~= "" then
+        hub_name = n
         if not fresh and b.resume and cmd == b.resume then
           local argv = M.split(cmd)
           local resumed = M.resume_argv({ kind = "claude", hub_name = n }, argv)
           if resumed ~= argv then cmd = M.join(resumed) end
         end
-        cmd = "HUB_NAME=" .. n .. " " .. cmd
+        if M.config.hub_env then cmd = "HUB_NAME=" .. n .. " " .. cmd end
       end
     end
     if launches then
-      launches[#launches + 1] = { cmd = cmd, labelled = labelled, hold = b.hold, label = b.label }
+      launches[#launches + 1] = { cmd = cmd, labelled = labelled, hold = b.hold, label = b.label, hub_name = hub_name }
     elseif cmd then opts.initial_input = b.hold and cmd or (cmd .. "\r") end -- hold: typed, not run
     local out = { flavor = SHELL_FLAVOR, options = opts }
     if b.label and b.label ~= "shell" then out.label = b.label end
@@ -2082,7 +2124,7 @@ function M.template_open(name, fresh)
       for j, launch in ipairs(list) do
         if launch.cmd and (launch.labelled ~= nil) == labelled_first then
           local ok, detail = M.start_command(r.session_id, r.initial_windows[i].block_ids[j],
-            launch.cmd, launch.labelled, launch.hold, M.agent_command(launch.cmd))
+            launch.cmd, launch.labelled, launch.hold, M.agent_command(launch.cmd), launch.hub_name)
           if detail then r.messages[#r.messages + 1] = (launch.label or "pane") .. ": " .. (ok and "warning: " or "skipped: ") .. detail end
         end
       end
@@ -2141,7 +2183,7 @@ function M.tab_to_session(sid, window_id, name)
       if cmd and not labelled then opts.initial_input = cmd end
       local b = { flavor = SHELL_FLAVOR, options = opts }
       if n.label and n.label ~= "shell" then b.label = n.label end
-      order[#order + 1] = { old = n.block_id, label = n.label, cmd = cmd, labelled = labelled, staged = not labelled }
+      order[#order + 1] = { old = n.block_id, label = n.label, cmd = cmd, labelled = labelled, staged = not labelled, hub_name = e.hub_name }
       return { block = b }
     end
     return { split = { direction = n.direction, ratio = n.ratio or 0.5, before = build(n.before), after = build(n.after) } }
@@ -2175,7 +2217,7 @@ function M.start_pending(name)
         else
           if o.labelled and o.staged == false then o.cmd = M.join(M.config.labelled[o.labelled].cmd) end
           local text = o.staged == false and o.cmd or ""
-          ok, detail = M.start_command(s.session_id, o.new, text, o.labelled, false, M.agent_command(o.cmd))
+          ok, detail = M.start_command(s.session_id, o.new, text, o.labelled, false, M.agent_command(o.cmd), o.hub_name)
         end
         o.error, o.warning = nil, nil
         if not ok then o.error = tostring(detail); left[#left + 1] = o

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Agents started from inside an agent pane (nested claude/amp, teammates) no longer inherit the pane's hub name; they get chief's folder name (`<folder>-<harness>`). Set `hub_env = true` to keep the old prefix. This applies to newly launched, prefix-free panes; existing or manually supplied environments are unchanged.
+- Check published names and live agent PIDs in status/verify when `hub_env` is off; show publication failures as readable warnings in the floating CLI.
 - Apply config edits on the next watcher save and palette action without restarting; invalid edits retain the last good config and warn once per bad text.
 - Save templates from the current session/tab after the name prompt, rejecting sessions or tabs closed while the prompt was open.
 - Protect expired names and labelled-launch locks while their owner is alive; compare PID and process start time before reclaiming them.
@@ -13,7 +15,7 @@
   and template names on server preview.21+. Preserve legacy fallbacks; cancellation never starts work.
 - Add `revive --only` for explicit selections and remember the last opened template privately.
 - Publish agent PIDs to names.json immediately after managed launches, with bounded polling,
-  relaunched-child detection and serialization against concurrent saves. Keep HUB_NAME prefixes.
+  relaunched-child detection and serialization against concurrent saves.
 - Cancel revive when Enter is pressed with no selected rows. Make service actions selectable,
   including services-only plans, instead of starting them implicitly.
 - Exclude Amp `--execute=…` one-shot jobs from recovery.

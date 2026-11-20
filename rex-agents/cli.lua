@@ -175,6 +175,9 @@ local function cmd_template_open(a)
     return
   end
   print(rex.json.encode(r))
+  if flag(a, "--linger") then
+    for _, message in ipairs(r.messages or {}) do print(message) end
+  end
 end
 
 local function cmd_park(a)
@@ -244,7 +247,9 @@ local function cmd_status(a)
         block_id = r.block_id, kind = r.kind, hub_name = r.hub_name, env_hub = r.env_hub, state = r.state,
         pending = r.state == "restart pending", reason = r.reason }
     end
-    print(A.encode({ panes = rows, saved_at = st.saved_at, watcher = st.watcher, warnings = st.warnings, resume_prompt = st.resume_prompt }))
+    local result = { panes = rows, saved_at = st.saved_at, watcher = st.watcher, warnings = st.warnings, resume_prompt = st.resume_prompt }
+    if A.config.hub then result.hub_env = st.hub_env end
+    print(A.encode(result))
     return
   end
   local function cut(s, n) s = tostring(s or ""); return #s > n and (s:sub(1, n - 1) .. "…") or s end
@@ -252,6 +257,10 @@ local function cmd_status(a)
   local function row(session, window, label, kind, hub, state)
     if A.config.hub then print(string.format(fmt, session, window, label, kind, hub, state))
     else print(string.format(fmt, session, window, label, kind, state)) end
+  end
+  if A.config.hub then print("hub_env: " .. tostring(st.hub_env)) end
+  if st.resume_prompt and st.resume_prompt ~= "" then
+    print("resume_prompt (one turn on eligible Claude restores): " .. A.quote(st.resume_prompt))
   end
   row("SESSION", "TAB", "PANE", "KIND", "HUB NAME", "STATE")
   local pending, idle = 0, 0
@@ -270,9 +279,6 @@ local function cmd_status(a)
       .. " (⌘⇧B after a Rex restart, or park → reopen).")
   end
   if idle > 0 then print(idle .. " pane(s) are idle shells; ⌘⇧B brings them back.") end
-  if st.resume_prompt and st.resume_prompt ~= "" then
-    print("resume_prompt (one turn on eligible Claude restores): " .. A.quote(st.resume_prompt))
-  end
   for _, warning in ipairs(st.warnings) do print("warning: " .. warning) end
 end
 

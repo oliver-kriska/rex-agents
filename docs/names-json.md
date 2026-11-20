@@ -1,10 +1,12 @@
 # Hub names and names.json
 
-Hub integration is optional. Add `hub = true` inside `~/.config/rex/rex-agents.local.lua`'s returned table, then rerun setup to restart the watcher and reload Rex config. This does not install a hub. **chief** is a separate message-hub tool with a client that consumes this map; rex-agents works without it.
+Hub integration is optional. Add `hub = true` inside `~/.config/rex/rex-agents.local.lua`'s returned table; edits apply on the next watcher save and palette action. This does not install a hub. **chief** is a separate message-hub tool with a client that consumes this map; rex-agents works without it.
 
 ## Name assignment
 
-Revive, template-open and start-pending prefix Claude Code, interactive Amp and Amp runner commands with `HUB_NAME=<name>`. Amp orb providers and viewers receive no generated prefix. Already-running agents keep their environment.
+By default, `names.json` is the only source of generated hub names for new launches. Revive, template-open and start-pending do not add `HUB_NAME`. Set `hub_env = true` alongside `hub = true` to restore the old prefix on Claude Code, interactive Amp and Amp runner commands. Amp orb providers and viewers receive no generated prefix. Existing or manually supplied `HUB_NAME` values remain recognised; already-running agents keep their environment.
+
+In prefix-free panes, nested Claude/Amp agents and teammates no longer inherit the pane's environment name. With chief's ancestry-aware client they use its `<folder>-<harness>` fallback. This depends on the chief client, not just this producer; test the two together before migrating. Existing prefixed panes must be relaunched without an inherited/manual `HUB_NAME` to get this behavior.
 
 Saves assign unique names among live agent panes **on the inspected Rex server**, not across servers. Priority:
 
@@ -16,7 +18,7 @@ Saves assign unique names among live agent panes **on the inspected Rex server**
 
 Collisions try a session prefix, then a generated name or numeric suffix. Renaming a conversation does not replace a saved name. Names match `[A-Za-z0-9][A-Za-z0-9._-]*` and contain at most 64 characters.
 
-Status adds a hub column: `ok` means the environment matches, `restart pending` means the agent has no `HUB_NAME`, and `runs as NAME` means it has another one. Name validation is enabled only with this feature.
+Status adds a hub column. When a running agent carries `HUB_NAME`, `ok` means it matches the saved name and `runs as NAME` means it differs. Otherwise, with `hub_env = false`, `ok` requires the same name and a live agent PID in that block's `names.json` entry. Missing entries show `not published`, mismatched PIDs show `published for another process`, and mismatched names show `published as NAME`. With `hub_env = true`, an agent lacking the environment name still shows `restart pending`. Verify warns about these mismatches; both commands display `hub_env` next to any `resume_prompt` setting. Name validation is enabled only with hub integration.
 
 ## Producer contract: version 1
 
@@ -28,7 +30,7 @@ This is a bounded best-effort startup path, not a guarantee that a failed or ind
 
 Full scans discover processes **outside** `names.lock`. Only the final read/merge/write of `panes.json` and `names.json` is locked. Startup publication also saves the new pane's restore metadata, so an older scan cannot erase it. Under the lock, a scan re-reads current state and retains live entries published since its start (including the same timestamp second). Matching kind, hub name and an overlapping PID identify the same running agent: its PID lists are unioned. A replacement process does not inherit the old process's PIDs. Unseen, newly published live blocks are retained too.
 
-A busy commit is skipped; startup polling retries within its budget. Both `names.lock` and `labelled-start.lock` record the owner's PID and process start time in `owner.json`. After two minutes, a lock can be reclaimed only if that process has exited or the PID now belongs to a different process. Locks without an owner file retain the two-minute expiry; an unreadable/malformed owner or unavailable process check is left alone. Each state JSON file is atomically replaced and mode 600; the two files are not a single filesystem transaction. The `HUB_NAME` prefix remains supplied. Consumers must continue validating PID ancestry.
+A busy commit is skipped; startup polling retries within its budget. Both `names.lock` and `labelled-start.lock` record the owner's PID and process start time in `owner.json`. After two minutes, a lock can be reclaimed only if that process has exited or the PID now belongs to a different process. Locks without an owner file retain the two-minute expiry; an unreadable/malformed owner or unavailable process check is left alone. Each state JSON file is atomically replaced and mode 600; the two files are not a single filesystem transaction. Consumers must continue validating PID ancestry, particularly now that the launch prefix defaults off.
 
 ```json
 {
@@ -66,7 +68,7 @@ The prompt is appended as one shell-quoted positional argument only for a named 
 
 Checked against Claude Code 2.1.329 `--help`: `[prompt]` is a positional argument, interactive mode is the default, and `--resume` accepts a session ID. No `-p` is added. Tests use fake agents to verify exact argv and quoting; they do not run a real conversation or prove that Claude follows the request.
 
-## chief client rules (v0.1.0-pre.9)
+## chief client rules (v0.1.0-pre.11)
 
 Both `hub mcp` and ordinary CLI commands resolve a name in this order: `--as`, `HUB_NAME`, then `blocks[$REX_BLOCK]` in the map. Empty explicit values count as absent. This describes the consumer, not additional validation performed by rex-agents.
 
@@ -76,8 +78,8 @@ The map is accepted only when:
 - It is at most 1,000,000 bytes and its inode, size and modification time remain unchanged across reading.
 - Its JSON has `version: 1` and an integer `saved_at` no more than 600 seconds old or 60 seconds in the future.
 - It contains the current block, a valid hub name and listed process IDs.
-- A listed PID is an ancestor of the client, and every intervening process is a recognised shell or launcher. A nested agent cannot take its parent's pane name.
+- A listed PID is an ancestor of the client, with only recognised shells/launchers or the harness's own recognised child in between. A nested agent cannot take its parent's pane name.
 
-Refusals include a one-line reason. Without a usable name, `hub mcp` fails; ordinary CLI commands fall back to `cli-$USER`, quietly when no map exists. Lookup checks file metadata, reads the map, obtains the UID with `id -u`, and uses at most one `ps` ancestry snapshot. It does not query Rex.
+For a new agent awaiting publication, the client polls for up to 12 seconds (500 ms between attempts). Unsafe/stale maps are refused without waiting. If no pane name is usable, a recognised agent gets a hub-assigned `<folder>-<harness>` name, with numeric suffixes for collisions. An agent that already took a folder name keeps it for that process lifetime even if a pane name appears later. Outside a recognised agent, ordinary CLI commands fall back to `cli-$USER` and `hub mcp` requires an explicit name. The client does not query Rex.
 
-The pre.9 client reads the fixed default path `~/.local/state/rex-agents/names.json`, **not** rex-agents' state-directory overrides. Keep that in mind when setting `XDG_STATE_HOME` or testing isolated instances.
+The pre.11 client reads the fixed default path `~/.local/state/rex-agents/names.json`, **not** rex-agents' state-directory overrides. Keep that in mind when setting `XDG_STATE_HOME` or testing isolated instances. Older clients without this wait/fallback behavior should keep `hub_env = true` until upgraded.
