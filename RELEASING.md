@@ -1,7 +1,7 @@
 # Releasing rex-agents
 
 The repository is both source code and a Homebrew tap. A release tag selects the source
-archive; the formula on `main` supplies its checksum. The latest release is v0.2.0 and its
+archive; the formula on `main` supplies its checksum. The latest release is v0.2.1 and its
 checksum is pinned. Follow this procedure for a new version; never recreate an existing tag.
 
 These are maintainer steps, not an automatic release script. Tags, pushes, releases and

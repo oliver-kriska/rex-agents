@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.2.1 — 2026-11-23
+
 - Publish agents started by hand (typed into a pane) to names.json as soon as the watcher sees them, instead of at its next save 20 s later. Hub clients that wait 12 s for a pane name now get it.
 
 ## v0.2.0 — 2026-11-20
