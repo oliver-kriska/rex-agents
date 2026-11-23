@@ -792,6 +792,34 @@ assert_published "Concurrent A" agent
 assert_published "Concurrent B" agent
 [ ! -d "$T/agents/names.lock" ] || fail "publication leaked its lock"
 
+# An agent typed by hand (not launched by rex-agents) is published by the watcher's
+# process event within seconds, long before its next save (soon=3600 here).
+HAND=$(rx new Hand --json | jq -r .session_id)
+HB=$(rx block ls -s "$HAND" --json | jq -r '.blocks[0].block_id')
+i=0; until rx block call -s "$HAND" -b "$HB" process | jq -e '.foreground.name' >/dev/null 2>&1; do
+  i=$((i + 1)); [ $i -lt 50 ] || fail "hand-start shell did not start"; sleep 0.2
+done
+REX_AGENTS_CONFIG="$T/no-env.lua" "$REX" --autostart=false -S "$URL" 'do' "$ROOT/rex-agents/watch.lua" --all interval=3600 soon=3600 >"$T/hand-watch.log" 2>&1 &
+HW=$!
+i=0; until grep -q "saved .* (start)" "$T/hand-watch.log"; do
+  i=$((i + 1)); [ $i -lt 100 ] || { cat "$T/hand-watch.log"; fail "hand-start watcher did not start"; }; sleep 0.2
+done
+STAMP=$(python3 -c 'import time; print(time.monotonic())')
+rx send -s "$HAND" -b "$HB" "cd '$T/w/plain' && '$T/bin/claude'"$'\r'
+i=0; until jq -e --arg b "$HB" '.blocks[$b].pids | length > 0' "$N" >/dev/null 2>&1; do
+  i=$((i + 1)); [ $i -lt 50 ] || { cat "$T/hand-watch.log"; kill -TERM "$HW"; fail "hand-started agent not published within 10s"; }; sleep 0.2
+done
+python3 - "$STAMP" <<'PY'
+import sys, time
+elapsed = time.monotonic() - float(sys.argv[1])
+assert elapsed < 6, elapsed
+print(f'ok - hand-started agent published by the watcher in {elapsed:.3f}s')
+PY
+HPID=$(rx block call -s "$HAND" -b "$HB" process | jq -r .foreground.pid)
+jq -e --arg b "$HB" --argjson p "$HPID" '.blocks[$b].pids | index($p)' "$N" >/dev/null || fail "hand-started agent published with the wrong PID"
+grep -q "published $HB (agent started)" "$T/hand-watch.log" || fail "watcher did not log the hand-start publication"
+kill -TERM "$HW"; wait "$HW" 2>/dev/null || true
+
 # Freeze a scan after it captured its view, then publish a previously unseen agent.
 # The hook is confined to this test process; production has no test-delay environment switch.
 cat >"$T/slow-save.lua" <<EOF

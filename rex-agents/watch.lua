@@ -51,9 +51,37 @@ local function soon()
   pending = rex.after(SOON, function() save("change") end)
 end
 
+-- An agent started by hand (typed in a pane, not launched by rex-agents) gets its pane's name
+-- in names.json right away: chief's client waits only 12 s for it, less than SOON. rex-agents'
+-- own launches publish the same way. Only the new agent's block is read, not every session.
+local published = {} -- block id -> agent PID published from here
+-- Servers preview.20/.21 pass the location (session_id, block_id) first and the event fields
+-- (foreground, plus the location again) second, the reverse of the documented (ev, ctx); read both.
+local function publish_hand_start(a, b)
+  a, b = a or {}, b or {}
+  local fg = b.foreground or a.foreground
+  local sid, bid = a.session_id or b.session_id, a.block_id or b.block_id
+  if not (fg and fg.pid and sid and bid) then return end
+  if not (A.agent_program(fg.name) or A.agent_program(fg.argv0)) then return end
+  if published[bid] == fg.pid then return end
+  A.reload_config()
+  if not A.config.hub then return end
+  local ok, err = pcall(A.publish_started, sid, bid, nil, 3)
+  if ok and not err then
+    published[bid] = fg.pid
+    print(os.date("%Y-%m-%d %H:%M:%S") .. " published " .. bid .. " (agent started)")
+  else
+    print(os.date("%Y-%m-%d %H:%M:%S") .. " publish " .. bid .. " skipped: " .. tostring(err))
+  end
+  io.flush()
+end
+
 -- A program starting or exiting in a pane changes its foreground process; new panes and
 -- sessions also count. Bursts collapse into one save SOON seconds after the first event.
-rex.on("terminal.process_changed", soon)
+rex.on("terminal.process_changed", function(a, b)
+  soon()
+  publish_hand_start(a, b)
+end)
 rex.on("block_created", soon)
 rex.on("session_created", soon)
 

@@ -450,6 +450,10 @@ do
   A.start_command, A.run_services = start, services
   check("agent command with env", A.agent_command("HUB_NAME=worker /tmp/bin/claude --model sonnet"), true)
   check("viewer is not an agent command", A.agent_command("tail claude"), false)
+  check("agent program by path", A.agent_program("/Users/x/.amp/bin/amp"), true)
+  check("agent program by name", A.agent_program("claude"), true)
+  check("other program is not an agent", A.agent_program("zsh"), false)
+  check("missing program is not an agent", A.agent_program(nil), false)
 end
 
 -- Exercise the registered actions, not just a reason classifier. A cancelled prompt must

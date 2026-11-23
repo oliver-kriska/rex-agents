@@ -1608,14 +1608,17 @@ function M.wait_ready(label)
   return label .. ": readiness timed out waiting for " .. (path or "running check") .. "; continuing"
 end
 
+-- A program name or path that runs Claude Code or Amp.
+function M.agent_program(name)
+  name = name and basename(name)
+  return name == "claude" or name == "amp"
+end
+
 -- Template/pending commands may prefix the executable with environment assignments.
 function M.agent_command(text)
   local words = M.split(text or "")
   for _, word in ipairs(words) do
-    if not word:match("^[%a_][%w_]*=") then
-      local name = basename(word)
-      return name == "claude" or name == "amp"
-    end
+    if not word:match("^[%a_][%w_]*=") then return M.agent_program(word) end
   end
   return false
 end
@@ -1623,9 +1626,10 @@ end
 -- Publish just this launch, not a full (potentially slow) scan of every session. The watcher
 -- still reconciles the complete map. Fresh process reads avoid caching the shell's old argv.
 -- Nine wall-clock seconds leave a margin for filesystem writes within the 10s target.
-function M.publish_started(sid, bid, requested_name)
+-- The watcher passes a shorter budget for agents started by hand.
+function M.publish_started(sid, bid, requested_name, budget)
   if not M.config.hub then return end
-  local deadline = os.time() + 9
+  local deadline = os.time() + (budget or 9)
   local function publish()
     repeat
       local leaf = leaf_info(sid, bid, {})
