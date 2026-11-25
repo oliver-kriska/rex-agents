@@ -1,8 +1,8 @@
 class RexAgents < Formula
   desc "Restore coding agents and project layouts after a Rex restart"
   homepage "https://github.com/oliver-kriska/rex-agents"
-  url "https://github.com/oliver-kriska/rex-agents/archive/refs/tags/v0.2.1.tar.gz"
-  sha256 "d8ecd32505cd2d4f506ab8b57df8bc29bf94eaef8a154b37e0a063de28340b47"
+  url "https://github.com/oliver-kriska/rex-agents/archive/refs/tags/v0.2.2.tar.gz"
+  sha256 "8830022c725adc6baaa08b4b8d5e29474e8c11d956f565b42ab5424d08508ca6"
   license "MIT"
   head "https://github.com/oliver-kriska/rex-agents.git", branch: "main"
 
