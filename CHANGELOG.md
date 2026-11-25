@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.2.2 — 2026-11-25
+
 - The watcher tries to publish each hand-started agent once. A failed try was repeated whenever the agent's pane switched back to it, for example after a long Claude Code tool call, blocking the watcher for up to 3 s each time. Failures are left to the regular saves, and the warning states the real time limit.
 - Tested with Rex preview.23.
 
