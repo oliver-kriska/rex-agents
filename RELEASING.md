@@ -11,7 +11,7 @@ session as part of packaging validation.
 ## 1. Check the release candidate
 
 - Run the tests and linters listed in [README.md](README.md#contributing-and-tests).
-- Run `tests/e2e.sh` separately with the preview.20 and preview.21 binaries using `REX_BIN`.
+- Run `tests/e2e.sh` separately with the preview.20 and the newest preview binaries using `REX_BIN`.
   Confirm each binary with its `version` command first.
 - Wait for the candidate's GitHub Actions run to pass. E2e is local-only; CI does not install Rex.
 - Review the changelog and the release diff for private paths, state files and credentials.

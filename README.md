@@ -22,7 +22,7 @@ https://github.com/user-attachments/assets/59f85a04-6293-4381-8673-1e98ec55dafc
 
 ## Requirements
 
-- macOS and Rex **0.1.0-preview.18 or newer**; tested on preview.18 (API 13), preview.20 (API 16) and preview.21 (API 18).
+- macOS and Rex **0.1.0-preview.18 or newer**; tested on preview.18 (API 13), preview.20 (API 16), preview.21 (API 18) and preview.23 (API 19).
 - Native prompts need **Rex server preview.21+** and a compatible connected app. Older servers use floating terminal pickers.
 - **fzf** for terminal/fallback pickers; Homebrew installs it with rex-agents. Clone users: `brew install fzf`.
 - Claude Code and/or Amp installed and available to your shell for agent recovery.

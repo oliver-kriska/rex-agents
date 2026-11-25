@@ -1678,7 +1678,8 @@ function M.publish_started(sid, bid, requested_name, budget)
   local ok, result = pcall(publish)
   exec_deadline = nil
   if not ok or not result then
-    return "agent PID publication unconfirmed within 10s; watcher will retry" .. (not ok and (": " .. tostring(result)) or "")
+    return ("agent PID publication unconfirmed within %ds; watcher will retry"):format(budget or 10)
+      .. (not ok and (": " .. tostring(result)) or "")
   end
 end
 

@@ -818,6 +818,34 @@ PY
 HPID=$(rx block call -s "$HAND" -b "$HB" process | jq -r .foreground.pid)
 jq -e --arg b "$HB" --argjson p "$HPID" '.blocks[$b].pids | index($p)' "$N" >/dev/null || fail "hand-started agent published with the wrong PID"
 grep -q "published $HB (agent started)" "$T/hand-watch.log" || fail "watcher did not log the hand-start publication"
+
+# A failed hand-start publication is not retried for the same agent process: Claude Code's tools
+# switch the pane's foreground away and back, and each retry blocked the watcher. Hold the names
+# lock so the first try fails, then suspend and resume the agent: same PID, a new process event.
+RETRY=$(rx new Retry --json | jq -r .session_id)
+RB=$(rx block ls -s "$RETRY" --json | jq -r '.blocks[0].block_id')
+i=0; until rx block call -s "$RETRY" -b "$RB" process | jq -e '.foreground.name' >/dev/null 2>&1; do
+  i=$((i + 1)); [ $i -lt 50 ] || fail "retry shell did not start"; sleep 0.2
+done
+mkdir "$T/agents/names.lock"
+rx send -s "$RETRY" -b "$RB" "cd '$T/w/plain' && '$T/bin/claude'"$'\r'
+i=0; until grep -q "publish $RB skipped: agent PID publication unconfirmed within 3s" "$T/hand-watch.log"; do
+  i=$((i + 1)); [ $i -lt 50 ] || { cat "$T/hand-watch.log"; rmdir "$T/agents/names.lock"; kill -TERM "$HW"; fail "held lock did not fail the hand-start publication"; }; sleep 0.2
+done
+rmdir "$T/agents/names.lock"
+RPID=$(rx block call -s "$RETRY" -b "$RB" process | jq -r .foreground.pid)
+rx send -s "$RETRY" -b "$RB" $'\x1a'
+i=0; until [ "$(rx block call -s "$RETRY" -b "$RB" process | jq -r .foreground.name)" = zsh ]; do
+  i=$((i + 1)); [ $i -lt 50 ] || { kill -TERM "$HW"; fail "agent did not suspend"; }; sleep 0.2
+done
+sleep 2 # Rex sends no process events for a foreground that switches away and back within ~1 s
+rx send -s "$RETRY" -b "$RB" $'fg\r'
+i=0; until [ "$(rx block call -s "$RETRY" -b "$RB" process | jq -r .foreground.pid)" = "$RPID" ]; do
+  i=$((i + 1)); [ $i -lt 50 ] || { kill -TERM "$HW"; fail "agent did not resume"; }; sleep 0.2
+done
+sleep 4
+[ "$(grep -c "$RB" "$T/hand-watch.log")" = 1 ] || { cat "$T/hand-watch.log"; kill -TERM "$HW"; fail "failed hand-start publication was retried for the same agent"; }
+ok "failed hand-start publication is not retried for the same agent process"
 kill -TERM "$HW"; wait "$HW" 2>/dev/null || true
 
 # Freeze a scan after it captured its view, then publish a previously unseen agent.

@@ -32,7 +32,7 @@ Never test against a live work session. Run separately with `cc`, `jq`, `python3
 REX_BIN=/path/to/rex tests/e2e.sh
 ```
 
-Tested versions are **0.1.0-preview.18 (API 13)**, **preview.20 (API 16)** and **preview.21 (API 18)**. Confirm each binary with `version` first. CI does not download Rex: no unattended, version-pinned distribution is configured.
+Tested versions are **0.1.0-preview.18 (API 13)**, **preview.20 (API 16)**, **preview.21 (API 18)** and **preview.23 (API 19)**. Confirm each binary with `version` first. CI does not download Rex: no unattended, version-pinned distribution is configured.
 
 E2e starts private throwaway servers, pins every client with `--autostart=false -S`, and stops only verified test-owned PIDs with SIGTERM. It runs fake Claude/Amp programs, not real accounts, and runs the unit suite inside Rex. Cases cover save/restart/revive, actual fzf selection/cancellation, service selection, templates, readiness, duplicate guards and hub opt-in/out.
 

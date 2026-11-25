@@ -54,7 +54,10 @@ end
 -- An agent started by hand (typed in a pane, not launched by rex-agents) gets its pane's name
 -- in names.json right away: chief's client waits only 12 s for it, less than SOON. rex-agents'
 -- own launches publish the same way. Only the new agent's block is read, not every session.
-local published = {} -- block id -> agent PID published from here
+-- Each agent process gets one try: Claude Code running a tool switches the pane's foreground
+-- away and back, and retrying a failure on every switch blocked the watcher for seconds each
+-- time. A failed agent is left to the SOON and INTERVAL saves.
+local tried = {} -- block id -> agent PID last tried from here
 -- Servers preview.20/.21 pass the location (session_id, block_id) first and the event fields
 -- (foreground, plus the location again) second, the reverse of the documented (ev, ctx); read both.
 local function publish_hand_start(a, b)
@@ -63,12 +66,12 @@ local function publish_hand_start(a, b)
   local sid, bid = a.session_id or b.session_id, a.block_id or b.block_id
   if not (fg and fg.pid and sid and bid) then return end
   if not (A.agent_program(fg.name) or A.agent_program(fg.argv0)) then return end
-  if published[bid] == fg.pid then return end
+  if tried[bid] == fg.pid then return end
   A.reload_config()
   if not A.config.hub then return end
+  tried[bid] = fg.pid
   local ok, err = pcall(A.publish_started, sid, bid, nil, 3)
   if ok and not err then
-    published[bid] = fg.pid
     print(os.date("%Y-%m-%d %H:%M:%S") .. " published " .. bid .. " (agent started)")
   else
     print(os.date("%Y-%m-%d %H:%M:%S") .. " publish " .. bid .. " skipped: " .. tostring(err))
